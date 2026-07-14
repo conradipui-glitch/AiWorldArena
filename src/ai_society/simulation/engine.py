@@ -247,6 +247,25 @@ class SimulationEngine:
             scheduled = self._peek_scheduled()
             return None if scheduled is None else scheduled.kind
 
+    def observe_agent(self, agent_id: str) -> AgentObservation:
+        """Return the current world view available to one agent.
+
+        This is deliberately scoped to the selected agent.  Observer clients may
+        request it for inspection, but the method never exposes this projection
+        to another agent or mutates the authoritative world.
+        """
+        with self._lock:
+            agent = self.state.agents.get(agent_id)
+            if agent is None:
+                raise LookupError(agent_id)
+            projected = agent.model_copy(deep=True)
+            self._advance_needs_to(projected, self.state.game_minute)
+            return self._build_observation(
+                projected,
+                game_minute=self.state.game_minute,
+                radius=VISIBILITY_RADIUS,
+            )
+
     def record_stale_decision(self, ticket: DecisionTicket) -> WorldEvent:
         with self._lock:
             return self.event_log.append(

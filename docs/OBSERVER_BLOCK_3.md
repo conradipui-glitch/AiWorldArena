@@ -1,0 +1,62 @@
+# Block 3 — Visual Observer MVP
+
+## Назначение
+
+Браузерный клиент — это наблюдатель, а не источник истины. Он получает
+проекции авторитетного мира через HTTP и read-only WebSocket, но не может
+передать снимок мира, журнал событий или решение агента для прямой мутации.
+
+## Запуск на Windows
+
+После установки Python-зависимостей проекта подготовьте клиент один раз:
+
+```powershell
+Set-Location C:\REPO\AiWorldArena\client
+npm ci
+Set-Location ..
+.\scripts\observer.ps1
+```
+
+Откройте `http://127.0.0.1:5173`. Скрипт запускает API только на loopback и
+Vite-клиент только на loopback. Логи находятся в `work/` и не входят в Git.
+
+## Граница ответственности
+
+```text
+Phaser / React observer
+  ├── read-only WebSocket: world snapshot
+  └── ограниченные operator commands: pause, speed, save, load
+                ↓
+FastAPI observer projection + headless runner
+                ↓
+SimulationEngine (authoritative world + event log)
+```
+
+- Поток `/v1/runs/{run_id}/stream` принимает соединение и отправляет снимки.
+  Любое сообщение от клиента получает `read_only_stream`; оно не может
+  изменить мир.
+- `pause` и `speed` — узкие операторские команды, валидируемые отдельной
+  Pydantic-схемой. Внешние поля, включая `state`, получают `422`.
+- Headless runner продолжает обрабатывать события без WebSocket-подписчиков.
+- Сохранение использует уже существующий integrity-checked `SnapshotRepository`.
+  Загрузка помечается как импортированная, как и CLI-resume.
+
+## Наблюдательские представления
+
+- Карта Phaser строится из серверных tiles, ресурсов, построек и агентов.
+- День/ночь и базовая погода являются детерминированной **визуальной
+  проекцией** seed и игрового времени. В Block 3 погода не меняет законы мира;
+  это явно указано в интерфейсе.
+- Инспектор показывает только агент-скоупленные наблюдения, известную карту,
+  SQLite-память, beliefs, связи, активные обещания и краткое объяснение
+  последнего решения.
+- В стартовом выборе модели намеренно доступен только `scripted-v1`: это
+  воспроизводимый локальный режим Visual Observer MVP. Подключение произвольной
+  Ollama-модели в этот экран потребует отдельной интеграции ExecutiveRunner,
+  а не имитации поддержки в UI.
+
+## Проверки
+
+- Python: `python -m pytest -q`.
+- Клиент: `npm run build` и `npx tsc --noEmit` из `client/`.
+- CI повторяет Python suite и Windows Node build.

@@ -1,0 +1,630 @@
+"""Read models and headless run control for the Block 3 observer.
+
+The browser is a replaceable observer.  This module owns the small amount of
+runtime orchestration needed to keep a scripted simulation moving while no
+browser is connected, and projects authoritative state into Russian observer
+views.  It never accepts a client-supplied world state or client-generated
+events.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from ai_society.cognition.embeddings import DeterministicEmbeddingProvider
+from ai_society.cognition.repository import SQLiteCognitionRepository
+from ai_society.domain.enums import MemoryLayer, RunStatus, WorldEventKind
+from ai_society.domain.events import WorldEvent
+from ai_society.domain.models import ActionResult
+from ai_society.executive.projector import CognitionProjector
+from ai_society.persistence.repository import SnapshotRepository
+from ai_society.simulation.engine import SimulationEngine
+from ai_society.simulation.generation import generate_world
+from ai_society.simulation.policies import ScriptedPolicy
+
+
+ACTION_LABELS = {
+    "observe": "Осмотр",
+    "move": "Перемещение",
+    "gather": "Сбор ресурсов",
+    "consume": "Приём пищи",
+    "rest": "Отдых",
+    "wait": "Ожидание",
+    "build_fire": "Строительство костра",
+    "build_shelter": "Строительство укрытия",
+    "speak": "Разговор",
+    "transfer": "Передача ресурса",
+    "create_offer": "Предложение обмена",
+    "respond_to_offer": "Ответ на обмен",
+    "create_promise": "Создание обещания",
+    "resolve_promise": "Завершение обещания",
+}
+
+EVENT_LABELS = {
+    WorldEventKind.WORLD_CREATED: "Мир создан",
+    WorldEventKind.AGENT_OBSERVED: "осматривает окрестности",
+    WorldEventKind.AGENT_MOVED: "перемещается",
+    WorldEventKind.RESOURCE_GATHERED: "собирает ресурс",
+    WorldEventKind.RESOURCE_CONSUMED: "использует запас",
+    WorldEventKind.AGENT_RESTED: "отдыхает",
+    WorldEventKind.AGENT_WAITED: "ожидает",
+    WorldEventKind.ACTION_REJECTED: "получает отклонение действия",
+    WorldEventKind.STRUCTURE_BUILT: "завершает постройку",
+    WorldEventKind.MESSAGE_SENT: "отправляет сообщение",
+    WorldEventKind.MESSAGE_DELIVERED: "получает сообщение",
+    WorldEventKind.MESSAGE_EXPIRED: "теряет сообщение по сроку",
+    WorldEventKind.RESOURCE_TRANSFERRED: "передаёт ресурс",
+    WorldEventKind.OFFER_CREATED: "создаёт предложение обмена",
+    WorldEventKind.OFFER_DELIVERED: "получает предложение обмена",
+    WorldEventKind.OFFER_ACCEPTED: "принимает обмен",
+    WorldEventKind.OFFER_REJECTED: "отклоняет обмен",
+    WorldEventKind.OFFER_EXPIRED: "теряет предложение по сроку",
+    WorldEventKind.COMMITMENT_CREATED: "создаёт обещание",
+    WorldEventKind.COMMITMENT_FULFILLED: "выполняет обещание",
+    WorldEventKind.COMMITMENT_BROKEN: "нарушает обещание",
+    WorldEventKind.COMMITMENT_EXPIRED: "не успевает выполнить обещание",
+    WorldEventKind.MODEL_OUTPUT_REJECTED: "получает отклонённый ответ модели",
+    WorldEventKind.MODEL_FALLBACK_USED: "переходит к безопасному действию",
+    WorldEventKind.MODEL_REBOUND: "получает новую модель решений",
+    WorldEventKind.SNAPSHOT_IMPORTED: "загружен из сохранения",
+    WorldEventKind.SCHEDULED_EVENT_SKIPPED: "пропускает событие",
+}
+
+RESOURCE_LABELS = {
+    "wood": "древесина",
+    "stone": "камень",
+    "berry": "ягоды",
+    "water": "вода",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class ObserverRunConfig:
+    seed: int
+    width: int
+    height: int
+    agents: list[str]
+    provider: str = "deterministic"
+    model: str = "scripted-v1"
+
+
+@dataclass(slots=True)
+class ObserverSession:
+    engine: SimulationEngine
+    cognition: SQLiteCognitionRepository
+    projector: CognitionProjector
+    paused: bool = True
+    speed: int = 1
+    advance_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    subscribers: set[asyncio.Queue[dict[str, Any]]] = field(default_factory=set)
+    last_actions: dict[str, dict[str, str | int]] = field(default_factory=dict)
+    task: asyncio.Task[None] | None = None
+
+
+class RunRegistry:
+    """Owns live engines and their read-only observer subscriptions."""
+
+    def __init__(
+        self,
+        *,
+        snapshot_root: Path,
+        cognition_root: Path,
+        tick_seconds: float = 0.35,
+    ) -> None:
+        self._runs: dict[str, ObserverSession] = {}
+        self._snapshot_repository = SnapshotRepository(snapshot_root)
+        self._cognition_root = cognition_root
+        self._cognition_root.mkdir(parents=True, exist_ok=True)
+        self._tick_seconds = tick_seconds
+        self._serial = 0
+        self._closed = False
+
+    async def create(self, config: ObserverRunConfig) -> SimulationEngine:
+        if config.provider != "deterministic" or config.model != "scripted-v1":
+            raise ValueError(
+                "в текущем наблюдателе доступен только локальный сценарный режим"
+            )
+        world = generate_world(
+            seed=config.seed,
+            width=config.width,
+            height=config.height,
+            agent_names=config.agents,
+        )
+        if world.run.run_id in self._runs:
+            raise ValueError("идентичный детерминированный запуск уже существует")
+        engine = SimulationEngine(state=world, policy=ScriptedPolicy())
+        session = self._new_session(engine)
+        self._runs[world.run.run_id] = session
+        await self._refresh_cognition(session)
+        return engine
+
+    def get(self, run_id: str) -> ObserverSession:
+        try:
+            return self._runs[run_id]
+        except KeyError as exc:
+            raise LookupError(run_id) from exc
+
+    async def advance(self, run_id: str, events: int) -> int:
+        session = self.get(run_id)
+        async with session.advance_lock:
+            completed = 0
+            for _ in range(events):
+                result = session.engine.step()
+                if result is None:
+                    session.paused = True
+                    break
+                completed += 1
+                self._record_action(session, result)
+            await self._refresh_cognition(session)
+        await self.publish(run_id)
+        return completed
+
+    async def set_controls(
+        self, run_id: str, *, paused: bool | None, speed: int | None
+    ) -> ObserverSession:
+        session = self.get(run_id)
+        if speed is not None:
+            if speed not in {1, 3, 10}:
+                raise ValueError("скорость должна быть 1, 3 или 10")
+            session.speed = speed
+        if paused is not None:
+            session.paused = paused
+            session.engine.state.run.status = (
+                RunStatus.PAUSED if paused else RunStatus.RUNNING
+            )
+            if not paused:
+                self._ensure_loop(run_id, session)
+        await self.publish(run_id)
+        return session
+
+    def save_snapshot(self, run_id: str, name: str) -> str:
+        session = self.get(run_id)
+        saved = self._snapshot_repository.save(
+            name,
+            state=session.engine.state,
+            events=session.engine.event_log.events,
+        )
+        return saved.stem
+
+    async def load_snapshot(self, name: str) -> SimulationEngine:
+        envelope = self._snapshot_repository.load(name)
+        engine = SimulationEngine.restore(
+            state=envelope.state,
+            events=envelope.events,
+            policy=ScriptedPolicy(),
+        )
+        engine.mark_snapshot_imported(
+            source_state_hash=envelope.state_hash,
+            source_event_digest=envelope.event_digest,
+        )
+        run_id = engine.state.run.run_id
+        prior = self._runs.pop(run_id, None)
+        if prior is not None:
+            await self._retire(prior)
+        session = self._new_session(engine)
+        self._runs[run_id] = session
+        await self._refresh_cognition(session)
+        await self.publish(run_id)
+        return engine
+
+    def list_snapshots(self) -> list[str]:
+        result = []
+        for path in self._snapshot_repository.root.glob("*.json"):
+            if path.is_file() and not path.is_symlink():
+                result.append(path.stem)
+        return sorted(result)
+
+    def snapshot(self, run_id: str) -> dict[str, Any]:
+        session = self.get(run_id)
+        return self._world_projection(session)
+
+    def inspector(self, run_id: str, agent_id: str) -> dict[str, Any]:
+        session = self.get(run_id)
+        engine = session.engine
+        try:
+            observation = engine.observe_agent(agent_id)
+            agent = engine.state.agents[agent_id]
+        except KeyError as exc:
+            raise LookupError(agent_id) from exc
+
+        memories = session.cognition.list_memories(
+            run_id=run_id,
+            agent_id=agent_id,
+            layers=[MemoryLayer.WORKING, MemoryLayer.EPISODIC, MemoryLayer.SOCIAL],
+        )[-8:]
+        beliefs = session.cognition.list_beliefs(run_id=run_id, agent_id=agent_id)[-8:]
+        commitments = [
+            commitment
+            for commitment in engine.state.commitments.values()
+            if agent_id in {commitment.creator_id, commitment.beneficiary_id}
+        ]
+        return {
+            "agent_id": agent_id,
+            "name": agent.identity.name,
+            "model": {
+                "provider": agent.mind.provider,
+                "name": agent.mind.model,
+                "tier": agent.mind.intelligence_tier.value,
+            },
+            "goal": agent.identity.long_term_goal,
+            "body": agent.body.model_dump(mode="json"),
+            "position": agent.position.model_dump(mode="json"),
+            "inventory": {
+                RESOURCE_LABELS.get(kind.value, kind.value): quantity
+                for kind, quantity in agent.inventory.items()
+            },
+            "current_action": self._action_for(session, agent_id),
+            "last_decision": self._decision_explanation(session, agent_id),
+            "observation": {
+                "game_minute": observation.game_minute,
+                "visible_tiles": [tile.model_dump(mode="json") for tile in observation.visible_tiles],
+                "visible_resources": [
+                    resource.model_dump(mode="json")
+                    for resource in observation.visible_resources
+                ],
+                "visible_agents": [
+                    visible.model_dump(mode="json")
+                    for visible in observation.visible_agents
+                ],
+                "delivered_messages": len(observation.delivered_messages),
+            },
+            "known_map": [position.model_dump(mode="json") for position in agent.knowledge.explored],
+            "memory": [self._memory_projection(memory) for memory in memories],
+            "beliefs": [self._belief_projection(belief) for belief in beliefs],
+            "relations": self._relations_projection(engine, agent_id),
+            "active_promises": [
+                {
+                    "id": commitment.commitment_id,
+                    "with": self._agent_name(engine, self._counterpart(commitment, agent_id)),
+                    "status": commitment.status.value,
+                    "terms": commitment.terms,
+                    "deadline_minute": commitment.deadline_minute,
+                }
+                for commitment in commitments
+                if commitment.status.value == "active"
+            ],
+        }
+
+    def subscribe(self, run_id: str) -> asyncio.Queue[dict[str, Any]]:
+        session = self.get(run_id)
+        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=2)
+        session.subscribers.add(queue)
+        return queue
+
+    def unsubscribe(self, run_id: str, queue: asyncio.Queue[dict[str, Any]]) -> None:
+        try:
+            self.get(run_id).subscribers.discard(queue)
+        except LookupError:
+            pass
+
+    async def publish(self, run_id: str) -> None:
+        session = self.get(run_id)
+        message = {"type": "world_snapshot", "data": self._world_projection(session)}
+        for queue in tuple(session.subscribers):
+            if queue.full():
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+            try:
+                queue.put_nowait(message)
+            except asyncio.QueueFull:
+                continue
+
+    async def shutdown(self) -> None:
+        self._closed = True
+        sessions = list(self._runs.values())
+        self._runs.clear()
+        for session in sessions:
+            await self._retire(session)
+
+    def _new_session(self, engine: SimulationEngine) -> ObserverSession:
+        self._serial += 1
+        database_name = (
+            f"observer-{engine.state.run.run_id.removeprefix('run-')}-{self._serial}"
+        )
+        cognition = SQLiteCognitionRepository(self._cognition_root, database_name)
+        return ObserverSession(
+            engine=engine,
+            cognition=cognition,
+            projector=CognitionProjector(cognition, DeterministicEmbeddingProvider()),
+        )
+
+    async def _retire(self, session: ObserverSession) -> None:
+        if session.task is not None and not session.task.done():
+            session.task.cancel()
+            try:
+                await session.task
+            except asyncio.CancelledError:
+                pass
+        session.cognition.close()
+
+    def _ensure_loop(self, run_id: str, session: ObserverSession) -> None:
+        if self._closed or (session.task is not None and not session.task.done()):
+            return
+        session.task = asyncio.create_task(
+            self._run_loop(run_id), name=f"observer-run-{run_id}"
+        )
+
+    async def _run_loop(self, run_id: str) -> None:
+        try:
+            while not self._closed:
+                session = self._runs.get(run_id)
+                if session is None:
+                    return
+                if not session.paused:
+                    await self.advance(run_id, session.speed)
+                await asyncio.sleep(self._tick_seconds / max(session.speed, 1))
+        except asyncio.CancelledError:
+            raise
+
+    async def _refresh_cognition(self, session: ObserverSession) -> None:
+        engine = session.engine
+        for agent_id in sorted(engine.state.agents):
+            observation = engine.observe_agent(agent_id)
+            await session.projector.project_observation(observation)
+            session.cognition.apply_forgetting(
+                run_id=engine.state.run.run_id,
+                agent_id=agent_id,
+                game_minute=engine.state.game_minute,
+            )
+            session.cognition.apply_belief_forgetting(
+                run_id=engine.state.run.run_id,
+                agent_id=agent_id,
+                game_minute=engine.state.game_minute,
+            )
+
+    def _record_action(self, session: ObserverSession, result: ActionResult) -> None:
+        if result.event_id is None:
+            return
+        event = next(
+            (
+                candidate
+                for candidate in reversed(session.engine.event_log.events)
+                if candidate.event_id == result.event_id
+            ),
+            None,
+        )
+        if event is None or event.actor_id is None:
+            return
+        action = str(event.payload.get("action", ""))
+        label = ACTION_LABELS.get(action, EVENT_LABELS.get(event.kind, "Действие"))
+        session.last_actions[event.actor_id] = {
+            "label": label,
+            "minute": event.game_minute,
+            "event_id": event.event_id,
+        }
+        session.cognition.add_memory(
+            run_id=session.engine.state.run.run_id,
+            agent_id=event.actor_id,
+            layer=MemoryLayer.WORKING,
+            content=f"{label}: {self._event_text(session.engine, event)}",
+            game_minute=event.game_minute,
+            importance_milli=700 if result.success else 780,
+            confidence_milli=1_000,
+            source_kind="authoritative_action_outcome",
+            source_actor_id=event.actor_id,
+            source_event_id=event.event_id,
+            dedupe_key=f"observer-event:{event.event_id}",
+        )
+        session.cognition.compact_working_memory(
+            run_id=session.engine.state.run.run_id,
+            agent_id=event.actor_id,
+            game_minute=event.game_minute,
+        )
+
+    def _world_projection(self, session: ObserverSession) -> dict[str, Any]:
+        engine = session.engine
+        state = engine.state
+        day = state.game_minute // 1_440 + 1
+        minute_of_day = state.game_minute % 1_440
+        hour, minute = divmod(minute_of_day, 60)
+        weather = self._weather(state.seed, day, hour)
+        agents = []
+        for agent_id, agent in sorted(state.agents.items()):
+            agents.append(
+                {
+                    "id": agent_id,
+                    "name": agent.identity.name,
+                    "position": agent.position.model_dump(mode="json"),
+                    "health": agent.body.health,
+                    "hunger": agent.body.hunger,
+                    "energy": agent.body.energy,
+                    "model": agent.mind.model,
+                    "goal": agent.identity.long_term_goal,
+                    "current_action": self._action_for(session, agent_id),
+                }
+            )
+        return {
+            "run": {
+                "id": state.run.run_id,
+                "seed": state.seed,
+                "paused": session.paused,
+                "speed": session.speed,
+                "processed_events": state.processed_events,
+                "modified": state.run.modified,
+            },
+            "environment": {
+                "day": day,
+                "clock": f"{hour:02d}:{minute:02d}",
+                "weather": weather["label"],
+                "weather_visual_only": True,
+                "night_overlay": weather["night_overlay"],
+            },
+            "map": {
+                "width": state.width,
+                "height": state.height,
+                "tiles": [
+                    {
+                        "x": tile.position.x,
+                        "y": tile.position.y,
+                        "terrain": tile.terrain.value,
+                    }
+                    for tile in state.tiles
+                ],
+                "resources": [
+                    {
+                        "id": resource.entity_id,
+                        "kind": resource.kind.value,
+                        "x": resource.position.x,
+                        "y": resource.position.y,
+                        "quantity": resource.quantity,
+                    }
+                    for resource in state.resources.values()
+                    if resource.quantity > 0
+                ],
+                "structures": [
+                    {
+                        "id": structure.structure_id,
+                        "kind": structure.kind.value,
+                        "x": structure.position.x,
+                        "y": structure.position.y,
+                    }
+                    for structure in state.structures.values()
+                ],
+            },
+            "agents": agents,
+            "events": [
+                self._event_projection(engine, event)
+                for event in engine.event_log.events[-24:]
+            ],
+            "instruments": {
+                "population": len(state.agents),
+                "resources": sum(
+                    resource.quantity for resource in state.resources.values()
+                ),
+                "structures": len(state.structures),
+                "active_promises": sum(
+                    1
+                    for commitment in state.commitments.values()
+                    if commitment.status.value == "active"
+                ),
+            },
+        }
+
+    @staticmethod
+    def _weather(seed: int, day: int, hour: int) -> dict[str, str | float]:
+        patterns = ("Ясно", "Лёгкий дождь", "Туман", "Переменная облачность")
+        label = patterns[(seed + day * 7) % len(patterns)]
+        if 6 <= hour < 19:
+            overlay = 0.0
+        elif 5 <= hour < 21:
+            overlay = 0.26
+        else:
+            overlay = 0.58
+        return {"label": label, "night_overlay": overlay}
+
+    def _event_projection(
+        self, engine: SimulationEngine, event: WorldEvent
+    ) -> dict[str, str | int | None]:
+        return {
+            "id": event.event_id,
+            "minute": event.game_minute,
+            "actor_id": event.actor_id,
+            "kind": event.kind.value,
+            "text": self._event_text(engine, event),
+        }
+
+    def _event_text(self, engine: SimulationEngine, event: WorldEvent) -> str:
+        if event.kind is WorldEventKind.WORLD_CREATED:
+            return "Создан новый детерминированный мир"
+        actor = self._agent_name(engine, event.actor_id)
+        label = EVENT_LABELS.get(event.kind, "изменяет мир")
+        if event.kind is WorldEventKind.RESOURCE_GATHERED:
+            resource = RESOURCE_LABELS.get(str(event.payload.get("resource", "")), "ресурс")
+            amount = event.payload.get("amount", 1)
+            return f"{actor} собирает {resource}: {amount}"
+        if event.kind is WorldEventKind.AGENT_MOVED:
+            return f"{actor} перемещается по карте"
+        if event.kind is WorldEventKind.ACTION_REJECTED:
+            return f"{actor}: действие отклонено правилами мира"
+        return f"{actor} {label}"
+
+    def _action_for(self, session: ObserverSession, agent_id: str) -> str:
+        action = session.last_actions.get(agent_id)
+        return "Ожидает первого решения" if action is None else str(action["label"])
+
+    def _decision_explanation(self, session: ObserverSession, agent_id: str) -> str:
+        action = self._action_for(session, agent_id)
+        explanations = {
+            "Осмотр": "Осматривает доступную область, чтобы пополнить известную карту.",
+            "Перемещение": "Выбирает соседнюю доступную клетку для исследования или пути к ресурсу.",
+            "Сбор ресурсов": "Забирает доступный ресурс рядом с собой для поддержания запасов.",
+            "Приём пищи": "Восстанавливает состояние до того, как голод станет опасным.",
+            "Отдых": "Восстанавливает энергию перед следующим действием.",
+        }
+        return explanations.get(
+            action,
+            "Последнее решение зафиксировано авторитетным журналом мира.",
+        )
+
+    def _relations_projection(
+        self, engine: SimulationEngine, agent_id: str
+    ) -> list[dict[str, str | int]]:
+        result = []
+        for counterpart_id, counterpart in sorted(engine.state.agents.items()):
+            if counterpart_id == agent_id:
+                continue
+            commitments = [
+                commitment
+                for commitment in engine.state.commitments.values()
+                if {commitment.creator_id, commitment.beneficiary_id}
+                == {agent_id, counterpart_id}
+                and commitment.status.value == "active"
+            ]
+            result.append(
+                {
+                    "agent_id": counterpart_id,
+                    "name": counterpart.identity.name,
+                    "score": 50 + min(30, len(commitments) * 15),
+                    "basis": (
+                        "активное обязательство"
+                        if commitments
+                        else "нет зафиксированной связи"
+                    ),
+                }
+            )
+        return result
+
+    def _memory_projection(self, memory: Any) -> dict[str, str | int]:
+        content = str(memory.content)
+        if content.startswith("Resource "):
+            content = "Зафиксирован ресурс в зоне видимости."
+        elif content.startswith("Message "):
+            content = "Зафиксировано сообщение в доступной переписке."
+        elif content.startswith("Commitment "):
+            content = "Зафиксировано обязательство с другим агентом."
+        return {
+            "id": memory.memory_id,
+            "layer": memory.layer.value,
+            "content": content,
+            "minute": memory.created_minute,
+            "confidence": memory.confidence_milli,
+        }
+
+    @staticmethod
+    def _belief_projection(belief: Any) -> dict[str, str | int]:
+        return {
+            "subject": belief.subject,
+            "statement": "Последнее наблюдение остаётся актуальным.",
+            "confidence": belief.confidence_milli,
+            "minute": belief.updated_minute,
+        }
+
+    @staticmethod
+    def _counterpart(commitment: Any, agent_id: str) -> str:
+        return (
+            commitment.beneficiary_id
+            if commitment.creator_id == agent_id
+            else commitment.creator_id
+        )
+
+    @staticmethod
+    def _agent_name(engine: SimulationEngine, agent_id: str | None) -> str:
+        if agent_id is None:
+            return "Мир"
+        agent = engine.state.agents.get(agent_id)
+        return agent.identity.name if agent is not None else agent_id

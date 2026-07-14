@@ -8,6 +8,7 @@ dist/
 build/
 *.egg-info/
 node_modules/
+.npm-cache/
 data/snapshots/*.json
 !data/snapshots/.gitkeep
 data/cognition/*

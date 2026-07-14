@@ -26,3 +26,21 @@ jobs:
         run: python -m compileall -q src tests
       - name: Test
         run: python -m pytest --cov=ai_society --cov-report=term
+  observer-client:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - name: Install client dependencies
+        run: npm ci
+      - name: Type check observer
+        run: npx tsc --noEmit
+      - name: Build observer
+        run: npm run build

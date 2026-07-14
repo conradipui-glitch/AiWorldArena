@@ -59,6 +59,33 @@
 - Формальный security scan намеренно отложен; промежуточный scan не был запечатан после изменения
   target snapshot, поэтому финального отчёта Block 2 нет.
 
+## Блок 3
+
+| Требование | Проверка | Статус |
+|---|---|---|
+| Phaser отображает server-projected tiles, ресурсы, постройки и агентов | Browser smoke + `client/src/components/WorldCanvas.tsx` | PASS |
+| Камера и визуальные переходы действий не меняют серверный мир | Browser smoke; Phaser pan + move tween, authoritative positions приходят из snapshot | PASS |
+| День/ночь и базовая погода видны как чистая presentation-проекция | `test_observer_projection_controls_inspector_and_snapshot` | PASS |
+| Клиент получает русскоязычный live snapshot и может переподключиться | `test_read_only_websocket_reconnects_with_fresh_snapshot` | PASS |
+| Поток не принимает мутацию от клиента | `test_read_only_websocket_reconnects_with_fresh_snapshot` | PASS |
+| Browser не может передать авторитетный `state` в control endpoint | `test_observer_projection_controls_inspector_and_snapshot` | PASS |
+| Headless world продолжается без браузера | `test_headless_run_continues_after_control_without_browser` | PASS |
+| Pause, ×1/×3/×10, save/load реализованы через narrow operator API | `test_observer_projection_controls_inspector_and_snapshot` + browser smoke | PASS |
+| Inspector показывает agent-scoped observation, known map, SQLite memory, beliefs, relations, promises и последнее решение | `test_observer_projection_controls_inspector_and_snapshot` + browser smoke | PASS |
+| Клиент типизируется и собирается на Windows | `npx tsc --noEmit`; `npm run build` | PASS |
+| Локальный запуск описан и работает на loopback | `docs/OBSERVER_BLOCK_3.md`; `scripts/observer.ps1`; browser smoke | PASS |
+
+## Результат блока 3
+
+- Full Python suite: `84 passed` на Python 3.12.13; coverage: `88%`.
+- Client: `npx tsc --noEmit` и `npm run build` проходят.
+- Browser smoke: создание запуска, WebSocket-подключение, пауза/скорость, хроника и
+  инспектор агента проверены в локальном браузере без console errors.
+- Визуальная QA: `design-qa.md`, итог `passed`.
+- Ограничение: единственный доступный выбор модели в текущем Visual Observer —
+  воспроизводимый `scripted-v1`; подстановка произвольной Ollama-модели в экран
+  требует отдельной связки с `ExecutiveRunner` и не имитируется UI.
+
 ## Условие завершения
 
 Все обязательные строки блока должны получить `PASS`. Известное ограничение допускается только если оно не скрывает обязательную часть и зафиксировано в этом документе.
