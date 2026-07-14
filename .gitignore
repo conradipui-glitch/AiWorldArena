@@ -10,6 +10,8 @@ build/
 node_modules/
 data/snapshots/*.json
 !data/snapshots/.gitkeep
+data/cognition/*
+!data/cognition/.gitkeep
 work/*
 !work/.gitkeep
 outputs/*

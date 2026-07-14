@@ -2,7 +2,12 @@
 
 ## Overview
 
-Репозиторий реализует локальную исследовательскую платформу с авторитетным Python world kernel, будущим LLM Executive Layer, FastAPI control/observation API, браузерным клиентом и сохраняемыми экспериментами. Наиболее ценные активы: целостность мира и replay, конфиденциальность памяти и provider credentials, изоляция знаний агентов, достоверность исследовательских результатов и безопасность локальной машины оператора.
+Репозиторий реализует локальную исследовательскую платформу с авторитетным Python world kernel,
+LLM Executive Layer, provider adapters, отдельным SQLite cognition repository, FastAPI
+control/observation API, будущим браузерным клиентом и сохраняемыми экспериментами. Наиболее ценные
+активы: целостность мира и будущего replay, конфиденциальность памяти и provider credentials,
+изоляция знаний агентов, достоверность исследовательских результатов и безопасность локальной
+машины оператора.
 
 ## Threat Model, Trust Boundaries, and Assumptions
 
@@ -26,7 +31,9 @@
 - Только world kernel изменяет authoritative state.
 - Каждое действие проверяет capability, восприятие, расстояние, владение и ресурсы.
 - Agent projection не содержит скрытых данных.
-- Event chain и snapshots обнаруживают повреждение; exact replay не вызывает сеть.
+- Event chain и snapshots обнаруживают внутреннее повреждение и несогласованность, но не
+  аутентифицируют происхождение внешнего файла; import помечается `modified`/`unverified`.
+- Будущий exact replay не должен вызывать сеть.
 - Snapshot/import paths остаются внутри configured root; executable deserialization отсутствует.
 - Secrets никогда не попадают в prompts, events, snapshots, logs или exports.
 - API слушает loopback по умолчанию; внешний режим требует отдельной security configuration.
@@ -48,11 +55,20 @@
 
 ### Persistence and imports
 
-Traversal, symlink escape, oversized JSON и unsafe deserialization могут повредить файлы или выполнить код. Block 1 использует fixed-root slug names, canonical JSON, size/schema checks и hash-chain verification. Pickle, executable YAML, dynamic import и shell запрещены.
+Traversal, symlink escape, oversized JSON и unsafe deserialization могут повредить файлы или
+выполнить код. Snapshot repository использует fixed-root slug names, canonical JSON, size/schema
+checks, hash-chain verification и семантические world-state invariants. CLI import выставляет
+`run.modified=true` и записывает provenance `unverified_import`. Pickle, executable YAML, dynamic
+import и shell запрещены.
 
 ### Research integrity
 
-Подмена event log, смешение branch namespaces или незаписанное вмешательство способно сфальсифицировать эксперимент. Контроль: canonical hashes, immutable provenance, explicit run status (`clean`, `modified`, `experimental`, позднее `tampered/invalid`), version manifest и offline replay.
+Подмена event log, смешение branch namespaces или незаписанное вмешательство способно
+сфальсифицировать эксперимент. Неключевые canonical hashes проверяют целостность, но атакующий,
+который может переписать импортируемый файл, может пересчитать их; это не цифровая подпись.
+Текущие контроли: semantic validation, import provenance и explicit `modified` status. Immutable
+signed provenance, статусы `tampered/invalid`, version manifest и offline Decision Replay остаются
+последующими слоями защиты.
 
 ### Out of scope for the local MVP
 
@@ -83,7 +99,9 @@ Traversal, symlink escape, oversized JSON и unsafe deserialization могут �
 - Неполная диагностика отклонённого действия без изменения authoritative state.
 - Ошибка developer-only CLI, требующая локального доверенного доступа и не затрагивающая результаты сохранённого эксперимента.
 
-Версия ниже покрывает детерминированный inventory исходников блока 1; сам generated threat-model artifact и игнорируемые runtime-каталоги в digest не входят.
+## Verification status
 
-Repository: local-workspace:sha256:3f081d7b9e6e7695de26323a18dff7f161facfd64f636f103b2f497e08cb2de2
-Version: codex-security-snapshot/v1:sha256:677cf1a9ab0bb8f7c36ccba5ef0290a5d051c3a74af4d967857a1ec60e63e439
+Модель угроз обновлена для реализованных границ Block 2. Формальный repository-wide security scan
+на этом этапе намеренно отложен: промежуточный scan не был запечатан после изменения target
+snapshot, и финальный security report не создавался. Полный формальный scan остаётся обязательной
+работой Block 5 перед release candidate.

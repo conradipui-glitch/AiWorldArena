@@ -1,12 +1,15 @@
 # Roadmap
 
-## Блок 1 — Architecture Freeze + Headless World Kernel
+## Блок 1 — Architecture Freeze + Headless World Kernel — COMPLETE
 
 Утверждённые документы, детерминированный мир, событийный планировщик, scripted policy, базовые действия, event hash chain, snapshot save/load, headless CLI и минимальный FastAPI-каркас.
 
-## Блок 2 — Executive Layer + LLM Agents + Memory
+## Блок 2 — Executive Layer + LLM Agents + Memory — COMPLETE
 
-Provider interfaces, Ollama, partial prompt context, строгие intents, repair/fallback, four-layer memory, compaction/forgetting, subjective beliefs, async message contracts и минимальный commitment lifecycle.
+Provider interfaces, Ollama, partial prompt context, строгие intents, repair/fallback, model hot-swap,
+four-layer SQLite memory, compaction/forgetting, subjective beliefs, async messages/offers,
+минимальный commitment lifecycle и семантическая проверка snapshot реализованы и приняты полным
+локальным checkpoint-набором.
 
 ## Блок 3 — Visual Observer MVP
 
@@ -18,7 +21,8 @@ Provider interfaces, Ollama, partial prompt context, строгие intents, rep
 
 ## Блок 5 — Research Layer + Release Candidate
 
-Каталог запусков, mandatory minimal replication, rerun, branching, comparison, divergence, отчёты, reproducibility manifest, interventions, full security scan и release audit.
+Каталог запусков, mandatory minimal replication, rerun, branching, comparison, divergence, отчёты,
+reproducibility manifest, interventions, формальный полный security scan и release audit.
 
 ## Horizon A — Social and Information Expansion
 

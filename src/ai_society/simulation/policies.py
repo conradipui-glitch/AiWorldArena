@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from typing import Protocol
 
 from ai_society.domain.enums import ResourceKind, TerrainType
@@ -14,10 +15,20 @@ from ai_society.domain.models import AgentObservation, Position, ResourceNode, T
 from ai_society.simulation.rng import DeterministicRng
 
 
+@dataclass(frozen=True, slots=True)
+class PolicyDecision:
+    intent: AnyIntent
+    rejected_outputs: tuple[str, ...] = ()
+    fallback_used: bool = False
+    provider: str | None = None
+    model: str | None = None
+    binding_revision: int | None = None
+
+
 class AgentPolicy(Protocol):
     def decide(
         self, observation: AgentObservation, rng: DeterministicRng
-    ) -> AnyIntent: ...
+    ) -> AnyIntent | PolicyDecision: ...
 
 
 class ScriptedPolicy:

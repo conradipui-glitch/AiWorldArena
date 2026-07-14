@@ -3,6 +3,7 @@ import json
 import pytest
 
 from ai_society.persistence.event_log import EventIntegrityError, EventLog
+from ai_society.persistence.canonical import canonical_digest
 from ai_society.persistence.repository import SnapshotError, SnapshotRepository
 from ai_society.simulation.engine import SimulationEngine
 from ai_society.simulation.generation import generate_world
@@ -74,3 +75,38 @@ def test_snapshot_detects_state_tampering(tmp_path) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(SnapshotError, match="state hash mismatch"):
         repository.load("tamper-check")
+
+
+def test_snapshot_rejects_unknown_schema_version(tmp_path) -> None:
+    engine = new_engine()
+    repository = SnapshotRepository(tmp_path)
+    path = repository.save(
+        "unknown-schema",
+        state=engine.state,
+        events=engine.event_log.events,
+    )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["schema_version"] = "snapshot-v999"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(SnapshotError, match="schema validation failed"):
+        repository.load("unknown-schema")
+
+
+def test_snapshot_rejects_self_consistent_but_dangling_world_references(
+    tmp_path,
+) -> None:
+    engine = new_engine()
+    repository = SnapshotRepository(tmp_path)
+    path = repository.save(
+        "dangling-reference",
+        state=engine.state,
+        events=engine.event_log.events,
+    )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["state"]["event_queue"][0]["actor_id"] = "ghost-agent"
+    payload["state_hash"] = canonical_digest(payload["state"])
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(SnapshotError, match="schema validation failed"):
+        repository.load("dangling-reference")

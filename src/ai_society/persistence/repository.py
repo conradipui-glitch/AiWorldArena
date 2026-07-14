@@ -1,6 +1,7 @@
 import os
 import re
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -21,7 +22,7 @@ class SnapshotError(ValueError):
 class SnapshotEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: str = "snapshot-v1"
+    schema_version: Literal["snapshot-v1"] = "snapshot-v1"
     state_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     event_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     state: WorldState

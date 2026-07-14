@@ -15,6 +15,7 @@ class ScheduledEvent(BaseModel):
     sequence: int = Field(ge=0)
     kind: ScheduledEventKind
     actor_id: str = Field(min_length=1, max_length=96)
+    subject_id: str | None = Field(default=None, min_length=1, max_length=96)
 
 
 class WorldEvent(BaseModel):

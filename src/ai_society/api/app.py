@@ -6,6 +6,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from ai_society.simulation.engine import SimulationEngine
 from ai_society.simulation.generation import generate_world
 from ai_society.simulation.policies import ScriptedPolicy
+from ai_society.providers.contracts import ProviderError
+from ai_society.providers.ollama import OllamaModelProvider
+from ai_society.providers.registry import ProviderRegistry
 
 
 class CreateRunRequest(BaseModel):
@@ -51,20 +54,50 @@ class RunRegistry:
             raise LookupError(run_id) from exc
 
 
-def create_app(*, snapshot_root: Path | None = None) -> FastAPI:
+def build_default_provider_registry() -> ProviderRegistry:
+    registry = ProviderRegistry()
+    registry.register(OllamaModelProvider())
+    return registry
+
+
+def create_app(
+    *,
+    snapshot_root: Path | None = None,
+    provider_registry: ProviderRegistry | None = None,
+) -> FastAPI:
     del snapshot_root  # Persistence endpoints arrive after the API contract hardens.
     app = FastAPI(
         title="AI Society Simulation API",
-        version="0.1.0",
+        version="0.2.0",
         docs_url="/docs",
         redoc_url=None,
     )
     registry = RunRegistry()
     app.state.registry = registry
+    app.state.provider_registry = provider_registry
 
     @app.get("/health")
     def health() -> dict[str, str]:
-        return {"status": "ok", "engine": "block1"}
+        return {"status": "ok", "engine": "block2"}
+
+    @app.get("/v1/providers/{provider_id}/models")
+    async def list_provider_models(provider_id: str) -> dict[str, object]:
+        providers = app.state.provider_registry
+        if providers is None:
+            raise HTTPException(status_code=503, detail="model providers are not configured")
+        try:
+            models = await providers.list_models(provider_id)
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail="provider not found") from exc
+        except ProviderError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={"code": exc.code, "message": "provider is unavailable"},
+            ) from exc
+        return {
+            "provider": provider_id,
+            "models": [model.model_dump(mode="json") for model in models],
+        }
 
     @app.post("/v1/runs", status_code=status.HTTP_201_CREATED)
     def create_run(request: CreateRunRequest) -> dict[str, str | int]:
@@ -103,4 +136,4 @@ def create_app(*, snapshot_root: Path | None = None) -> FastAPI:
     return app
 
 
-app = create_app()
+app = create_app(provider_registry=build_default_provider_registry())

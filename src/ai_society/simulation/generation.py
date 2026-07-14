@@ -140,7 +140,7 @@ def generate_world(
         "width": width,
         "height": height,
         "agents": list(agent_names),
-        "rules_version": "block1-v1",
+        "rules_version": "block2-v1",
     }
     identity_digest = canonical_digest(identity_material)
     world_id = f"world-{identity_digest[:12]}"
