@@ -77,9 +77,33 @@ class _OllamaHttpClient:
                 async with self._semaphore:
                     async with self.client.stream(method, url, json=payload) as response:
                         if response.status_code < 200 or response.status_code >= 300:
+                            error_code, error_message = {
+                                401: (
+                                    "ollama_signin_required",
+                                    "Войдите в аккаунт Ollama, чтобы использовать облачные модели.",
+                                ),
+                                403: (
+                                    "ollama_subscription_required",
+                                    "Эта модель требует платную подписку Ollama.",
+                                ),
+                                404: (
+                                    "ollama_model_unavailable",
+                                    "Выбранная модель больше не доступна в Ollama.",
+                                ),
+                                429: (
+                                    "ollama_usage_limited",
+                                    "Лимит облачных запросов Ollama исчерпан или модель занята.",
+                                ),
+                            }.get(
+                                response.status_code,
+                                (
+                                    "ollama_http_error",
+                                    f"Ollama вернул HTTP {response.status_code}",
+                                ),
+                            )
                             raise ProviderError(
-                                "ollama_http_error",
-                                f"Ollama returned HTTP {response.status_code}",
+                                error_code,
+                                error_message,
                             )
                         size = 0
                         async for chunk in response.aiter_bytes():
@@ -146,6 +170,7 @@ class OllamaModelProvider:
         )
         self._cloud_cache: tuple[float, list[ModelDescriptor]] | None = None
         self._local_models: set[str] = set()
+        self._access_cache: dict[str, tuple[bool, str | None, str | None]] = {}
 
     async def list_models(self) -> list[ModelDescriptor]:
         payload = await self._http.request_json("GET", "/api/tags")
@@ -211,13 +236,19 @@ class OllamaModelProvider:
         if self.config.structured_outputs:
             body["format"] = request.intent_schema
         payload = await self._http.request_json("POST", "/api/chat", payload=body)
+        self._access_cache[request.model] = (True, None, None)
         message = payload.get("message")
         if not isinstance(message, dict) or not isinstance(message.get("content"), str):
             raise ProviderError(
                 "ollama_protocol_error", "Ollama chat response has no message content"
             )
         content = message["content"]
-        if not 1 <= len(content.encode("utf-8")) <= self.config.max_model_output_bytes:
+        output_size = len(content.encode("utf-8"))
+        if output_size == 0:
+            raise ProviderError(
+                "ollama_empty_output", "Ollama вернул пустой ответ модели"
+            )
+        if output_size > self.config.max_model_output_bytes:
             raise ProviderError(
                 "ollama_output_too_large", "Ollama model output exceeded the safe limit"
             )
@@ -252,6 +283,40 @@ class OllamaModelProvider:
         await self._http.close()
         if self._owns_cloud_client:
             await self._cloud_client.aclose()
+
+    async def check_access(self, model: str) -> None:
+        cached = self._access_cache.get(model)
+        if cached is not None:
+            available, code, message = cached
+            if available:
+                return
+            raise ProviderError(code or "ollama_http_error", message or "Модель недоступна")
+        await self._ensure_cloud_model(model)
+        body: dict[str, object] = {
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "Верни только один JSON-объект по заданной схеме.",
+                },
+                {"role": "user", "content": "Подтверди доступность."},
+            ],
+            "stream": False,
+            "think": False,
+            "format": {
+                "type": "object",
+                "properties": {"available": {"type": "boolean"}},
+                "required": ["available"],
+                "additionalProperties": False,
+            },
+            "options": {"temperature": 0, "num_predict": 32},
+        }
+        try:
+            await self._http.request_json("POST", "/api/chat", payload=body)
+        except ProviderError as exc:
+            self._access_cache[model] = (False, exc.code, str(exc))
+            raise
+        self._access_cache[model] = (True, None, None)
 
     async def _official_cloud_models(self) -> list[ModelDescriptor]:
         now = time.monotonic()

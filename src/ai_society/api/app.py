@@ -340,6 +340,8 @@ def create_app(
             if acquisition.reused:
                 response.status_code = status.HTTP_200_OK
             return {**acquisition.engine.summary(), "reused": acquisition.reused}
+        except ProviderError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 

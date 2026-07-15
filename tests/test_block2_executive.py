@@ -214,6 +214,11 @@ def test_prompt_context_excludes_hidden_world_and_every_foreign_memory_layer(tmp
             assert "169.254.169.254" not in combined
             context = json.loads(request.context_json)
             assert "mind" not in context
+            assert "intent_schema" not in context
+            assert request.intent_schema
+            assert request.intent_schema["type"] == "object"
+            assert request.intent_schema["required"] == ["reason", "action"]
+            assert "gather" in request.intent_schema["properties"]["action"]["enum"]
             assert context["agent_context"]["agent"]["agent_id"] == "agent-001"
 
     asyncio.run(scenario())
@@ -284,6 +289,33 @@ def test_provider_error_does_not_retry_and_becomes_safe_wait(tmp_path) -> None:
             )
             assert "SECRET_RESPONSE_BODY" not in serialized_events
             assert "ollama_timeout" in serialized_events
+
+    asyncio.run(scenario())
+
+
+def test_empty_ollama_output_gets_one_bounded_retry(tmp_path) -> None:
+    async def scenario() -> None:
+        provider = FakeModelProvider(
+            [
+                ProviderError("ollama_empty_output", "empty"),
+                '{"action":"wait","reason":"Теперь ответ сформирован полностью."}',
+            ]
+        )
+        engine = make_engine()
+        registry = configure_fake(engine, provider)
+        with SQLiteCognitionRepository(tmp_path) as cognition:
+            executive = ExecutiveLayer(
+                providers=registry,
+                cognition=cognition,
+                embedding_provider=DeterministicEmbeddingProvider(),
+            )
+            result = await ExecutiveRunner(engine, executive).step()
+            assert result is not None and result.success
+            assert len(provider.requests) == 2
+            assert provider.requests[1].repair is True
+            assert result.event_id is not None
+            calls = cognition.export_run(engine.state.run.run_id)["model_calls"]
+            assert [call["status"] for call in calls] == ["failed", "completed"]
 
     asyncio.run(scenario())
 
@@ -378,7 +410,6 @@ def test_cancelled_provider_call_finalizes_reservation_and_reraises(tmp_path) ->
 @pytest.mark.parametrize(
     "content",
     [
-        '```json\n{"action":"wait","reason":"x"}\n```',
         '{"action":"wait","reason":"x"} trailing',
         '{"action":"wait","reason":"x"}{"action":"wait","reason":"y"}',
         '{"action":"wait","reason":"x","endpoint":"http://evil"}',
@@ -392,6 +423,19 @@ def test_model_output_parser_rejects_permissive_or_coerced_json(content: str) ->
     )
     assert intent is None
     assert error in {"invalid_json", "invalid_intent_schema"}
+
+
+def test_model_output_parser_accepts_one_exact_json_fence() -> None:
+    intent, error = ExecutiveLayer._parse_model_output(
+        ModelResponse(
+            content='```json\n{"action":"wait","reason":"жду"}\n```',
+            model="test",
+        )
+    )
+
+    assert error is None
+    assert intent is not None
+    assert intent.action.value == "wait"
 
 
 def test_excessively_nested_model_json_falls_back_and_closes_budget_calls(

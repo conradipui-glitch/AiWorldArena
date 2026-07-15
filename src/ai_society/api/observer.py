@@ -202,7 +202,7 @@ class RunRegistry:
         elif config.agent_provider != "deterministic":
             if self._providers is None:
                 raise ValueError("провайдеры моделей не настроены")
-            await self._providers.validate_binding(
+            await self._providers.check_binding(
                 config.agent_provider, config.agent_model
             )
         elif config.agent_model != "scripted-v1":
@@ -233,7 +233,9 @@ class RunRegistry:
         if config.agent_provider != "deterministic":
             for index, agent in enumerate(world.agents.values()):
                 if config.agent_provider == "random":
-                    binding = random_models[(config.seed + index) % len(random_models)]
+                    binding = await self._accessible_random_model(
+                        random_models, start=config.seed + index
+                    )
                     agent_provider = binding.provider
                     agent_model = binding.model
                 else:
@@ -330,17 +332,20 @@ class RunRegistry:
         elif provider != "deterministic":
             if self._providers is None:
                 raise ValueError("провайдеры моделей не настроены")
-            await self._providers.validate_binding(provider, model)
+            await self._providers.check_binding(provider, model)
         elif model != "scripted-v1":
             raise ValueError("неизвестная сценарная модель поведения")
         async with self._lifecycle_lock:
             session = self.get(run_id)
             async with session.advance_lock:
                 if random_models:
-                    binding = random_models[
-                        (session.engine.state.seed + len(session.engine.state.agents))
-                        % len(random_models)
-                    ]
+                    binding = await self._accessible_random_model(
+                        random_models,
+                        start=(
+                            session.engine.state.seed
+                            + len(session.engine.state.agents)
+                        ),
+                    )
                     provider, model = binding.provider, binding.model
                 agent = session.engine.spawn_agent(
                     name=name,
@@ -396,24 +401,65 @@ class RunRegistry:
                 raise ValueError("Ollama не сообщил доступных моделей")
             session = self.get(run_id)
             ordinal = int(agent_id.rsplit("-", 1)[1])
-            descriptor = descriptors[
-                (session.engine.state.seed + session.engine.state.game_minute + ordinal)
-                % len(descriptors)
-            ]
+            descriptor = await self._accessible_random_model(
+                descriptors,
+                start=(
+                    session.engine.state.seed
+                    + session.engine.state.game_minute
+                    + ordinal
+                ),
+            )
             provider, model = descriptor.provider, descriptor.model
         else:
-            await self._providers.validate_binding(provider, model)
+            await self._providers.check_binding(provider, model)
         bindings = await self._providers.available_bindings()
         async with self._lifecycle_lock:
             session = self.get(run_id)
             async with session.advance_lock:
+                agent = session.engine.state.agents.get(agent_id)
+                if agent is None:
+                    raise LookupError(agent_id)
+                if agent.mind.provider == provider and agent.mind.model == model:
+                    session.last_reasons[agent_id] = (
+                        "Эта модель уже назначена. "
+                        + (
+                            "Продолжите время мира, чтобы она приняла следующий ход."
+                            if session.paused
+                            else "Она примет решение на ближайшем ходу."
+                        )
+                    )
+                    return
                 session.engine.hot_swap_model(
                     agent_id,
                     provider=provider,
                     model=model,
                     available_bindings=bindings,
                 )
+                session.last_reasons[agent_id] = (
+                    "Модель назначена. "
+                    + (
+                        "Продолжите время мира, чтобы она приняла первый ход."
+                        if session.paused
+                        else "Она примет решение на ближайшем ходу."
+                    )
+                )
         await self.publish(run_id)
+
+    async def _accessible_random_model(self, descriptors, *, start: int):
+        last_error: ProviderError | None = None
+        for offset in range(len(descriptors)):
+            descriptor = descriptors[(start + offset) % len(descriptors)]
+            try:
+                await self._providers.check_binding(
+                    descriptor.provider, descriptor.model
+                )
+            except ProviderError as exc:
+                last_error = exc
+                continue
+            return descriptor
+        if last_error is not None:
+            raise last_error
+        raise ValueError("Ollama не сообщил доступной модели")
 
     async def set_controls(
         self, run_id: str, *, paused: bool | None, speed: int | None

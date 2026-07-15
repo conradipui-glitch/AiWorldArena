@@ -73,9 +73,10 @@ function AgentCard({ agent, index, selected, onSelect }: {
   );
 }
 
-function InspectorDrawer({ inspector, catalog, onClose, onRebind }: {
+function InspectorDrawer({ inspector, catalog, paused, onClose, onRebind }: {
   inspector: AgentInspector | null;
   catalog: Catalog | null;
+  paused: boolean;
   onClose: () => void;
   onRebind: (modelKey: string) => Promise<void>;
 }) {
@@ -85,8 +86,17 @@ function InspectorDrawer({ inspector, catalog, onClose, onRebind }: {
     : [];
   const [modelKey, setModelKey] = useState("");
   const [busy, setBusy] = useState(false);
-  useEffect(() => { setModelKey(modelChoices[0] ? `${modelChoices[0].provider}/${modelChoices[0].model}` : ""); }, [inspector?.agent_id, catalog]);
+  const currentModelKey = inspector ? `${inspector.model.provider}/${inspector.model.name}` : "";
+  useEffect(() => {
+    const currentIsSelectable = modelChoices.some((model) => `${model.provider}/${model.model}` === currentModelKey);
+    setModelKey(currentIsSelectable ? currentModelKey : modelChoices[0] ? `${modelChoices[0].provider}/${modelChoices[0].model}` : "");
+  }, [currentModelKey, catalog]);
   const scripted = inspector?.model.provider === "deterministic";
+  const sameModel = Boolean(modelKey && modelKey === currentModelKey);
+  const modelError = inspector?.last_decision.includes("модель требует")
+    || inspector?.last_decision.includes("Модель не смогла")
+    || inspector?.last_decision.includes("нарушила формат")
+    || inspector?.last_decision.includes("Ollama временно отклонил");
 
   return (
     <div className="drawer-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
@@ -105,7 +115,9 @@ function InspectorDrawer({ inspector, catalog, onClose, onRebind }: {
           <section className="drawer-section model-switcher">
             <h3>Механизм решений</h3>
             <p>{scripted ? "Сейчас действует простая проверяемая стратегия. Выберите Ollama-модель, чтобы персонаж получал контекст мира и самостоятельно выбирал намерения." : "Модель получает только то, что видит и помнит этот персонаж."}</p>
-            {modelChoices.length ? <div className="inline-control"><select aria-label="Выбрать модель персонажа" value={modelKey} onChange={(event) => setModelKey(event.target.value)}>{modelChoices.map((model) => <option key={`${model.provider}/${model.model}`} value={`${model.provider}/${model.model}`}>{model.label}</option>)}</select><button type="button" disabled={busy || !modelKey} onClick={async () => { setBusy(true); try { await onRebind(modelKey); } finally { setBusy(false); } }}>{busy ? "Назначаем…" : "Назначить модель"}</button></div> : <p className="quiet-note">Ollama не сообщил доступных моделей. Запустите Ollama или добавьте модель — список появится после обновления страницы.</p>}
+            {paused && <p className="model-state model-state--paused">Мир на паузе: модель не вызывается. После назначения нажмите ▶ в верхней панели.</p>}
+            {modelError && inspector && <p className="model-state model-state--error">{inspector.last_decision}</p>}
+            {modelChoices.length ? <div className="inline-control"><select aria-label="Выбрать модель персонажа" value={modelKey} onChange={(event) => setModelKey(event.target.value)}>{modelChoices.map((model) => <option key={`${model.provider}/${model.model}`} value={`${model.provider}/${model.model}`}>{model.label}</option>)}</select><button type="button" disabled={busy || !modelKey || sameModel} onClick={async () => { setBusy(true); try { await onRebind(modelKey); } finally { setBusy(false); } }}>{busy ? "Проверяем доступ…" : sameModel ? "Уже назначена" : "Проверить и назначить"}</button></div> : <p className="quiet-note">Ollama не сообщил доступных моделей. Запустите Ollama или добавьте модель — список появится после обновления страницы.</p>}
           </section>
           <div className="vitals-grid"><article><span>Здоровье</span><strong>{inspector.body.health}</strong></article><article><span>Голод</span><strong>{inspector.body.hunger}</strong></article><article><span>Энергия</span><strong>{inspector.body.energy}</strong></article></div>
           <section className="drawer-section"><h3><Eye size={15} /> Доступное восприятие</h3><p>Видит {inspector.observation.visible_tiles.length} клеток, {inspector.observation.visible_resources.length} ресурсов и {inspector.observation.visible_agents.length} существ.</p>{inspector.observation.visible_agents.length ? inspector.observation.visible_agents.map((agent) => <p key={agent.agent_id}><strong>{agent.name}</strong> · {agent.species} · клетка {agent.position.x}:{agent.position.y}</p>) : <p>Других существ в поле зрения сейчас нет.</p>}</section>
@@ -279,7 +291,7 @@ export default function App() {
   const control = async (payload: { paused?: boolean; speed?: number }) => { if (!snapshot) return; try { setSnapshot(await api.controls(snapshot.run.id, payload)); } catch (error) { setNotice(error instanceof Error ? error.message : "Не удалось изменить время."); } };
   const saveCurrent = async () => { if (!snapshot) return; const name = `world-${snapshot.run.seed}-${snapshot.run.id.slice(-6)}-d${snapshot.environment.day}-e${snapshot.run.processed_events}-${Date.now().toString(36)}`; try { await api.save(snapshot.run.id, name); const response = await api.snapshots(); setSnapshots(response.snapshots); setSelectedSnapshot(name); setNotice(`Сохранение «${name}» создано.`); } catch (error) { setNotice(error instanceof Error ? error.message : "Не удалось сохранить мир."); } };
   const loadSelected = async () => { if (!selectedSnapshot) return; setBusy(true); try { const loaded = await api.load(selectedSnapshot); await openExistingRun(loaded.run_id, "Сохранение загружено и поставлено на паузу."); } catch (error) { setNotice(error instanceof Error ? error.message : "Не удалось загрузить сохранение."); } finally { setBusy(false); } };
-  const rebind = async (key: string) => { if (!snapshot || !selectedAgentId) return; const slash = key.indexOf("/"); try { await api.rebindAgent(snapshot.run.id, selectedAgentId, { provider: key.slice(0, slash), model: key.slice(slash + 1) }); await refreshInspector(snapshot.run.id, selectedAgentId); setNotice("Новая модель назначена. Личность и память персонажа сохранены."); } catch (error) { setNotice(error instanceof Error ? error.message : "Не удалось назначить модель."); } };
+  const rebind = async (key: string) => { if (!snapshot || !selectedAgentId) return; const slash = key.indexOf("/"); try { await api.rebindAgent(snapshot.run.id, selectedAgentId, { provider: key.slice(0, slash), model: key.slice(slash + 1) }); await refreshInspector(snapshot.run.id, selectedAgentId); setNotice(snapshot.run.paused ? "Модель проверена и назначена. Мир на паузе — нажмите ▶, чтобы получить её первый ход." : "Модель проверена и назначена. Она ответит на ближайшем ходу; личность и память сохранены."); } catch (error) { setNotice(error instanceof Error ? error.message : "Не удалось назначить модель."); } };
   const spawn = async (payload: Parameters<typeof api.spawnAgent>[1]) => { if (!snapshot) return; setBusy(true); try { const created = await api.spawnAgent(snapshot.run.id, payload); setPlacement(null); setSelectedAgentId(created.agent_id); setDrawer("inspector"); await refreshInspector(snapshot.run.id, created.agent_id); setNotice("Существо добавлено; вмешательство записано в хронику."); } catch (error) { setNotice(error instanceof Error ? error.message : "Не удалось добавить существо."); } finally { setBusy(false); } };
   const triggerEvent = async (payload: Parameters<typeof api.triggerEvent>[1]) => { if (!snapshot) return; setBusy(true); try { await api.triggerEvent(snapshot.run.id, payload); setPlacement(null); setNotice("Событие запущено и зафиксировано в истории мира."); } catch (error) { setNotice(error instanceof Error ? error.message : "Не удалось запустить событие."); } finally { setBusy(false); } };
 
@@ -304,7 +316,7 @@ export default function App() {
     <aside className="chronicle-rail"><div className="chronicle-clock"><small>ВРЕМЯ МИРА</small><strong>{snapshot?.environment.clock ?? "—"}</strong><span>{snapshot ? `День ${snapshot.environment.day}` : "Мир не запущен"}</span></div><div className="section-heading"><span>ХРОНИКА</span><small>{snapshot?.events.length ?? 0}</small></div><ol className="event-list">{snapshot ? [...snapshot.events].reverse().map((event) => <li className={event.kind.includes("researcher") || event.kind === "agent_spawned" ? "is-intervention" : ""} key={event.id}><time>{gameTime(event.minute).replace("День ", "Д")}</time><span>{event.text}</span></li>) : <li className="event-list__empty"><span>Здесь появятся решения, разговоры и события мира.</span></li>}</ol><div className="instrument-panel"><div className="section-heading"><span>ИНСТРУМЕНТЫ</span></div><p><UsersThree size={16} />Население <strong>{snapshot?.instruments.population ?? "—"}</strong></p><p><Database size={16} />Ресурсы <strong>{snapshot?.instruments.resources ?? "—"}</strong></p><p><WarningCircle size={16} />Обещания <strong>{snapshot?.instruments.active_promises ?? "—"}</strong></p><button type="button" disabled={!snapshot || isCompleted} onClick={() => { setPlacement(null); setDrawer("director"); }}><SlidersHorizontal size={17} />Открыть режиссёр мира</button></div></aside>
 
     <footer className="observer-footer"><span aria-live="polite">{notice}</span><small>{snapshot ? "Кликните по существу, чтобы открыть его восприятие, память и модель." : "Готовый сценарий — это выбор, а не обязательный режим."}</small></footer>
-    {drawer === "inspector" && <InspectorDrawer inspector={inspector} catalog={catalog} onClose={() => setDrawer(null)} onRebind={rebind} />}
+    {drawer === "inspector" && <InspectorDrawer inspector={inspector} catalog={catalog} paused={snapshot?.run.paused ?? true} onClose={() => setDrawer(null)} onRebind={rebind} />}
     {drawer === "director" && <DirectorDrawer catalog={catalog} tab={directorTab} setTab={setDirectorTab} placement={placement} setPlacement={setPlacement} onPlacementRequired={setPlacementRequired} onClose={() => { setDrawer(null); setPlacement(null); setPlacementRequired(false); }} onSpawn={spawn} onEvent={triggerEvent} busy={busy} />}
   </main>;
 }

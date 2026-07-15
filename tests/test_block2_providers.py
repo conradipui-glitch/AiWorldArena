@@ -165,8 +165,37 @@ def test_ollama_errors_are_typed_and_do_not_echo_response_body() -> None:
                 await provider.list_models()
         finally:
             await client.aclose()
-        assert captured.value.code == "ollama_http_error"
+        assert captured.value.code == "ollama_signin_required"
         assert secret not in str(captured.value)
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("status", "expected_code"),
+    [
+        (403, "ollama_subscription_required"),
+        (404, "ollama_model_unavailable"),
+        (429, "ollama_usage_limited"),
+        (500, "ollama_http_error"),
+    ],
+)
+def test_ollama_http_status_has_actionable_error_code(
+    status: int, expected_code: str
+) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, text="SECRET_REMOTE_DETAIL")
+
+    async def scenario() -> None:
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        provider = OllamaModelProvider(client=client)
+        try:
+            with pytest.raises(ProviderError) as captured:
+                await provider.list_models()
+        finally:
+            await client.aclose()
+        assert captured.value.code == expected_code
+        assert "SECRET_REMOTE_DETAIL" not in str(captured.value)
 
     asyncio.run(scenario())
 
@@ -186,6 +215,30 @@ def test_ollama_response_size_limit_is_enforced_while_streaming() -> None:
         finally:
             await client.aclose()
         assert captured.value.code == "ollama_response_too_large"
+
+    asyncio.run(scenario())
+
+
+def test_ollama_empty_model_output_has_specific_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/chat"
+        return httpx.Response(
+            200,
+            json={
+                "model": "qwen-test",
+                "message": {"role": "assistant", "content": ""},
+            },
+        )
+
+    async def scenario() -> None:
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        provider = OllamaModelProvider(client=client)
+        try:
+            with pytest.raises(ProviderError) as captured:
+                await provider.generate(model_request())
+        finally:
+            await client.aclose()
+        assert captured.value.code == "ollama_empty_output"
 
     asyncio.run(scenario())
 

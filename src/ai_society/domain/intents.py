@@ -183,5 +183,122 @@ AnyIntent: TypeAlias = Annotated[
 INTENT_ADAPTER = TypeAdapter(AnyIntent)
 
 
+# Ollama's structured-output implementation is substantially more reliable with
+# one flat object than with Pydantic's large discriminated-union schema.  The
+# authoritative validation below still uses INTENT_ADAPTER, so this compact
+# schema guides generation without weakening the world rules.
+MODEL_INTENT_SCHEMA: dict[str, object] = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 240,
+            "description": "Короткое публичное объяснение персонажа на русском языке.",
+        },
+        "action": {
+            "type": "string",
+            "enum": [action.value for action in ActionKind],
+            "description": "Тип действия. Ключ всегда называется action, не intent.",
+        },
+        "target": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "x": {"type": "integer", "minimum": 0},
+                "y": {"type": "integer", "minimum": 0},
+            },
+            "required": ["x", "y"],
+        },
+        "target_id": {
+            "type": "string",
+            "pattern": r"^resource-[0-9]{6}$",
+            "description": "Идентификатор видимого ресурса для gather.",
+        },
+        "amount": {"type": "integer", "minimum": 1, "maximum": 1000},
+        "resource": {
+            "type": "string",
+            "enum": [resource.value for resource in ResourceKind],
+        },
+        "target_agent_id": {
+            "type": "string",
+            "pattern": r"^agent-[0-9]{3}$",
+        },
+        "location": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "x": {"type": "integer", "minimum": 0},
+                "y": {"type": "integer", "minimum": 0},
+            },
+            "required": ["x", "y"],
+        },
+        "structure_id": {
+            "type": "string",
+            "pattern": r"^structure-[0-9]{6}$",
+        },
+        "message": {"type": "string", "minLength": 1, "maxLength": 2000},
+        "reply_to_id": {
+            "type": "string",
+            "pattern": r"^message-[0-9]{6}$",
+        },
+        "offer_resource": {
+            "type": "string",
+            "enum": [resource.value for resource in ResourceKind],
+        },
+        "offer_amount": {"type": "integer", "minimum": 1, "maximum": 1000},
+        "request_resource": {
+            "type": "string",
+            "enum": [resource.value for resource in ResourceKind],
+        },
+        "request_amount": {"type": "integer", "minimum": 1, "maximum": 1000},
+        "agreement_terms": {"type": "string", "maxLength": 4000},
+        "expires_in_minutes": {
+            "type": "integer",
+            "minimum": 2,
+            "maximum": 10080,
+        },
+        "offer_id": {"type": "string", "pattern": r"^offer-[0-9]{6}$"},
+        "response": {
+            "type": "string",
+            "enum": ["accept", "reject", "join", "refuse"],
+        },
+        "beneficiary_agent_id": {
+            "type": "string",
+            "pattern": r"^agent-[0-9]{3}$",
+        },
+        "due_in_minutes": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 43200,
+        },
+        "commitment_id": {
+            "type": "string",
+            "pattern": r"^commitment-[0-9]{6}$",
+        },
+        "resolution": {
+            "type": "string",
+            "enum": [resolution.value for resolution in CommitmentResolution],
+        },
+        "structure_kind": {
+            "type": "string",
+            "enum": [structure.value for structure in StructureKind],
+        },
+        "invited_agent_ids": {
+            "type": "array",
+            "items": {"type": "string", "pattern": r"^agent-[0-9]{3}$"},
+            "minItems": 1,
+            "maxItems": 10,
+        },
+        "project_id": {
+            "type": "string",
+            "pattern": r"^project-[0-9]{6}$",
+        },
+    },
+    "required": ["reason", "action"],
+}
+
+
 def parse_intent(value: object) -> AnyIntent:
     return INTENT_ADAPTER.validate_python(value)

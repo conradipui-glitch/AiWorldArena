@@ -81,7 +81,7 @@ class MindBinding(StrictModel):
     provider: str = Field(default="deterministic", min_length=1, max_length=64)
     model: str = Field(default="scripted-v1", min_length=1, max_length=128)
     temperature_milli: int = Field(default=0, ge=0, le=2_000)
-    max_output_tokens: int = Field(default=512, ge=32, le=2_048)
+    max_output_tokens: int = Field(default=1_024, ge=32, le=2_048)
     request_budget: int = Field(default=10_000, ge=0, le=1_000_000)
     token_budget: int = Field(default=1_000_000, ge=0, le=100_000_000)
     revision: int = Field(default=0, ge=0)

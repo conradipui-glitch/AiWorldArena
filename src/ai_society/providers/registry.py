@@ -36,6 +36,12 @@ class ProviderRegistry:
         if model not in {descriptor.model for descriptor in descriptors}:
             raise ValueError("model is not present in the provider inventory")
 
+    async def check_binding(self, provider_id: str, model: str) -> None:
+        await self.validate_binding(provider_id, model)
+        check_access = getattr(self.get(provider_id), "check_access", None)
+        if check_access is not None:
+            await check_access(model)
+
     async def close(self) -> None:
         for provider in self._providers.values():
             close = getattr(provider, "close", None)
