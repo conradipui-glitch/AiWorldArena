@@ -1,4 +1,4 @@
-import type { AgentInspector, Catalog, WorldSnapshot } from "./types";
+import type { AgentInspector, Catalog, LiveRun, WorldSnapshot } from "./types";
 
 const jsonHeaders = { "Content-Type": "application/json" };
 
@@ -13,6 +13,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   catalog: () => request<Catalog>("/v1/observer/catalog"),
+  runs: () => request<{ runs: LiveRun[] }>("/v1/runs"),
   observer: (runId: string) => request<WorldSnapshot>(`/v1/runs/${runId}/observer`),
   inspector: (runId: string, agentId: string) =>
     request<AgentInspector>(`/v1/runs/${runId}/agents/${agentId}/inspector`),
@@ -23,7 +24,7 @@ export const api = {
     agents: string[];
     provider: string;
     model: string;
-  }) => request<{ run_id: string }>("/v1/runs", {
+  }) => request<{ run_id: string; reused: boolean }>("/v1/runs", {
     method: "POST",
     headers: jsonHeaders,
     body: JSON.stringify(payload),

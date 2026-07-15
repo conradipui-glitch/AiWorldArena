@@ -45,10 +45,59 @@ try {
     $api = Invoke-RestMethod -Uri "http://127.0.0.1:$ApiPort/health" -TimeoutSec 5
     $uiHealth = Invoke-RestMethod -Uri "http://127.0.0.1:$UiPort/health" -TimeoutSec 5
     $page = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$UiPort/" -TimeoutSec 5
-    if ($api.status -ne 'ok' -or $uiHealth.status -ne 'ok' -or $page.StatusCode -ne 200) {
+    if (
+        $api.status -ne 'ok' -or
+        $api.observer_api -ne 'workspace-v1' -or
+        $uiHealth.status -ne 'ok' -or
+        $uiHealth.observer_api -ne 'workspace-v1' -or
+        $page.StatusCode -ne 200
+    ) {
         throw 'Запущенный наблюдатель не прошёл проверку API, proxy или главной страницы.'
     }
-    Write-Output "Smoke запуска пройден: API $ApiPort, UI $UiPort."
+
+    $emptyWorlds = Invoke-RestMethod -Uri "http://127.0.0.1:$ApiPort/v1/runs" -TimeoutSec 5
+    if ($null -eq $emptyWorlds.runs -or $emptyWorlds.runs.Count -ne 0) {
+        throw 'Рабочее пространство не открылось в ожидаемом пустом состоянии.'
+    }
+
+    $runRequest = @{
+        seed = 20260715
+        width = 48
+        height = 48
+        agents = @('Ада', 'Борин', 'Сайра')
+        provider = 'deterministic'
+        model = 'scripted-experiment-v1'
+    } | ConvertTo-Json -Compress
+    $created = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$ApiPort/v1/runs" `
+        -Method Post -ContentType 'application/json' -Body $runRequest -TimeoutSec 5
+    $firstRun = $created.Content | ConvertFrom-Json
+    if ($created.StatusCode -ne 201 -or $firstRun.reused -or -not $firstRun.run_id) {
+        throw 'Первое открытие мира не создало ожидаемый запуск.'
+    }
+
+    $reopened = Invoke-WebRequest -UseBasicParsing -Uri "http://127.0.0.1:$ApiPort/v1/runs" `
+        -Method Post -ContentType 'application/json' -Body $runRequest -TimeoutSec 5
+    $secondRun = $reopened.Content | ConvertFrom-Json
+    if ($reopened.StatusCode -ne 200 -or -not $secondRun.reused -or $secondRun.run_id -ne $firstRun.run_id) {
+        throw 'Повторное открытие не вернуло существующий детерминированный мир.'
+    }
+
+    $null = Invoke-RestMethod -Uri "http://127.0.0.1:$ApiPort/v1/runs/$($firstRun.run_id)/controls" `
+        -Method Post -ContentType 'application/json' -Body '{"paused":false}' -TimeoutSec 5
+    Start-Sleep -Milliseconds 750
+    $state = Invoke-RestMethod -Uri "http://127.0.0.1:$ApiPort/v1/runs/$($firstRun.run_id)/state" -TimeoutSec 5
+    if ($state.state.processed_events -le 0) {
+        throw 'После старта мир не начал обрабатываться.'
+    }
+    $observer = Invoke-RestMethod -Uri "http://127.0.0.1:$ApiPort/v1/runs/$($firstRun.run_id)/observer" -TimeoutSec 5
+    if (
+        $observer.agents.Count -ne 3 -or
+        $observer.events.Count -le 0 -or
+        $observer.run.scenario -ne 'Остров: три агента, семь дней'
+    ) {
+        throw 'Открытый мир не вернул ожидаемую карту и агентов.'
+    }
+    Write-Output "Smoke запуска пройден: API $ApiPort, UI $UiPort, живой мир открыт."
 } finally {
     $processIds = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
         Where-Object { $Ports -contains $_.LocalPort } |

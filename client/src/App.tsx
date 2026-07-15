@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CircleNotch,
   CloudRain,
@@ -13,9 +13,10 @@ import {
 } from "@phosphor-icons/react";
 import { api } from "./api";
 import { WorldCanvas } from "./components/WorldCanvas";
-import type { AgentInspector, AgentSummary, Catalog, WorldSnapshot } from "./types";
+import type { AgentInspector, AgentSummary, Catalog, LiveRun, WorldSnapshot } from "./types";
 
 const DEFAULT_NAMES = ["Ада", "Борин", "Сайра"];
+const LAST_RUN_STORAGE_KEY = "ai-world-arena:last-run-id";
 
 function meterValue(value: number, inverse = false) {
   return `${Math.max(0, Math.min(100, inverse ? 100 - value : value))}%`;
@@ -26,6 +27,11 @@ function gameTime(minute: number) {
   const hour = Math.floor((minute % 1440) / 60);
   const remainder = minute % 60;
   return `День ${day}, ${hour.toString().padStart(2, "0")}:${remainder.toString().padStart(2, "0")}`;
+}
+
+function liveRunLabel(run: LiveRun) {
+  const state = run.status === "completed" ? "завершён" : run.paused ? "пауза" : "идёт";
+  return `${run.scenario} · Seed ${run.seed} · ${gameTime(run.game_minute)} · ${state}`;
 }
 
 function AgentCard({
@@ -125,12 +131,113 @@ export default function App() {
   const [inspector, setInspector] = useState<AgentInspector | null>(null);
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [seed, setSeed] = useState("20260715");
-  const [modelKey, setModelKey] = useState("deterministic/scripted-experiment-v1");
+  const [modelKey, setModelKey] = useState("deterministic/scripted-v1");
   const [connection, setConnection] = useState<"idle" | "connecting" | "live" | "offline">("idle");
   const [snapshots, setSnapshots] = useState<string[]>([]);
   const [selectedSnapshot, setSelectedSnapshot] = useState("");
-  const [notice, setNotice] = useState("Выберите модель и запустите первый эксперимент.");
+  const [liveRuns, setLiveRuns] = useState<LiveRun[]>([]);
+  const [selectedLiveRunId, setSelectedLiveRunId] = useState("");
+  const [runsLoaded, setRunsLoaded] = useState(false);
+  const [notice, setNotice] = useState("Выберите готовый сценарий или создайте отдельный мир.");
   const [busy, setBusy] = useState(false);
+  const didRestoreLiveRun = useRef(false);
+
+  const selectedModel = useMemo(() => catalog?.models.find(
+    (model) => `${model.provider}/${model.model}` === modelKey,
+  ), [catalog, modelKey]);
+
+  const refreshLiveRuns = useCallback(async () => {
+    const response = await api.runs();
+    setLiveRuns(response.runs);
+    setSelectedLiveRunId((current) => (
+      current && response.runs.some((run) => run.run_id === current)
+        ? current
+        : response.runs[0]?.run_id ?? ""
+    ));
+    return response.runs;
+  }, []);
+
+  const rememberRun = useCallback((runId: string) => {
+    try {
+      window.localStorage.setItem(LAST_RUN_STORAGE_KEY, runId);
+    } catch {
+      // The observer remains usable when browser storage is unavailable.
+    }
+  }, []);
+
+  const openExistingRun = useCallback(async (
+    runId: string,
+    { resume = false, message }: { resume?: boolean; message?: string } = {},
+  ) => {
+    setBusy(true);
+    try {
+      const current = await api.observer(runId);
+      const world = resume && current.run.status !== "completed"
+        ? await api.controls(runId, { paused: false })
+        : current;
+      setSnapshot(world);
+      setSelectedAgentId(world.agents[0]?.id ?? null);
+      setSelectedLiveRunId(runId);
+      rememberRun(runId);
+      setNotice(message ?? (
+        world.run.status === "completed"
+          ? "Открыт завершённый эксперимент. Его карта, хроника и сохранения доступны для изучения."
+          : world.run.paused
+          ? "Открыт мир на паузе. Нажмите ▶, когда будете готовы продолжить время."
+          : "Открыт текущий мир: симуляция продолжает работать на локальном сервере."
+      ));
+      void refreshLiveRuns().catch(() => undefined);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Не удалось открыть выбранный мир.");
+    } finally {
+      setBusy(false);
+    }
+  }, [refreshLiveRuns, rememberRun]);
+
+  const createOrContinueRun = useCallback(async () => {
+    if (!selectedModel) return;
+    const normalizedSeed = seed.trim();
+    if (!normalizedSeed) {
+      setNotice("Введите seed нового мира.");
+      return;
+    }
+    const numericSeed = Number(normalizedSeed);
+    if (!Number.isSafeInteger(numericSeed) || numericSeed < 0) {
+      setNotice("Seed должен быть неотрицательным целым числом.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const acquired = await api.createRun({
+        seed: numericSeed,
+        width: 48,
+        height: 48,
+        agents: catalog?.agent_names ?? DEFAULT_NAMES,
+        provider: selectedModel.provider,
+        model: selectedModel.model,
+      });
+      const current = await api.observer(acquired.run_id);
+      const world = current.run.status === "completed"
+        ? current
+        : await api.controls(acquired.run_id, { paused: false });
+      setSnapshot(world);
+      setSelectedAgentId(world.agents[0]?.id ?? null);
+      setSelectedLiveRunId(acquired.run_id);
+      rememberRun(acquired.run_id);
+      setNotice(
+        world.run.status === "completed"
+          ? "Этот готовый эксперимент уже завершён. Открыта его итоговая хроника."
+          : acquired.reused
+          ? "Открыт и продолжен существующий мир. Его прежняя история сохранена."
+          : "Мир создан и запущен: агенты принимают решения, а хроника фиксирует последствия.",
+      );
+      void refreshLiveRuns().catch(() => undefined);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Не удалось создать мир.");
+    } finally {
+      setBusy(false);
+    }
+  }, [catalog?.agent_names, refreshLiveRuns, rememberRun, seed, selectedModel]);
 
   useEffect(() => {
     api.catalog()
@@ -140,7 +247,33 @@ export default function App() {
       })
       .catch((error: Error) => setNotice(error.message));
     api.snapshots().then((response) => setSnapshots(response.snapshots)).catch(() => undefined);
+    api.runs()
+      .then((response) => {
+        setLiveRuns(response.runs);
+        setSelectedLiveRunId(response.runs[0]?.run_id ?? "");
+      })
+      .catch((error: Error) => setNotice(error.message))
+      .finally(() => setRunsLoaded(true));
   }, []);
+
+  useEffect(() => {
+    if (!runsLoaded || didRestoreLiveRun.current) return;
+    didRestoreLiveRun.current = true;
+    if (!liveRuns.length) return;
+    let rememberedRunId: string | null = null;
+    try {
+      rememberedRunId = window.localStorage.getItem(LAST_RUN_STORAGE_KEY);
+    } catch {
+      // With no storage, reopening the only active local world is still intuitive.
+    }
+    const candidate = liveRuns.find((run) => run.run_id === rememberedRunId)
+      ?? (liveRuns.length === 1 ? liveRuns[0] : undefined);
+    if (candidate) {
+      void openExistingRun(candidate.run_id, {
+        message: "Открыт активный мир с локального сервера.",
+      });
+    }
+  }, [liveRuns, openExistingRun, runsLoaded]);
 
   const refreshInspector = useCallback(async (runId: string, agentId: string) => {
     try {
@@ -175,38 +308,6 @@ export default function App() {
     return () => socket.close();
   }, [snapshot?.run.id]);
 
-  const selectedModel = useMemo(() => catalog?.models.find(
-    (model) => `${model.provider}/${model.model}` === modelKey,
-  ), [catalog, modelKey]);
-
-  async function startRun() {
-    if (!selectedModel) return;
-    const numericSeed = Number(seed);
-    if (!Number.isSafeInteger(numericSeed) || numericSeed < 0) {
-      setNotice("Seed должен быть неотрицательным целым числом.");
-      return;
-    }
-    setBusy(true);
-    try {
-      const created = await api.createRun({
-        seed: numericSeed,
-        width: 48,
-        height: 48,
-        agents: catalog?.agent_names ?? DEFAULT_NAMES,
-        provider: selectedModel.provider,
-        model: selectedModel.model,
-      });
-      const world = await api.observer(created.run_id);
-      setSnapshot(world);
-      setSelectedAgentId(world.agents[0]?.id ?? null);
-      setNotice("Запуск создан. Мир остаётся на сервере и продолжит работу без открытого браузера.");
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "Не удалось создать запуск.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
   async function control(payload: { paused?: boolean; speed?: number }) {
     if (!snapshot) return;
     try {
@@ -219,7 +320,9 @@ export default function App() {
   async function saveCurrent() {
     if (!snapshot) return;
     try {
-      const name = `observer-${snapshot.run.id.replace("run-", "")}`;
+      const runKey = snapshot.run.id.replace(/^run-/, "");
+      const uniqueSuffix = Date.now().toString(36);
+      const name = `world-${snapshot.run.seed}-${runKey}-d${snapshot.environment.day}-e${snapshot.run.processed_events}-${uniqueSuffix}`;
       const saved = await api.save(snapshot.run.id, name);
       const response = await api.snapshots();
       setSnapshots(response.snapshots);
@@ -237,7 +340,14 @@ export default function App() {
       const world = await api.observer(loaded.run_id);
       setSnapshot(world);
       setSelectedAgentId(world.agents[0]?.id ?? null);
-      setNotice(`Загружено сохранение «${selectedSnapshot}».`);
+      setSelectedLiveRunId(loaded.run_id);
+      rememberRun(loaded.run_id);
+      setNotice(
+        world.run.status === "completed"
+          ? `Загружен завершённый эксперимент «${selectedSnapshot}».`
+          : `Загружено сохранение «${selectedSnapshot}». Мир поставлен на паузу — нажмите ▶ для продолжения.`,
+      );
+      void refreshLiveRuns().catch(() => undefined);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Не удалось загрузить сохранение.");
     }
@@ -247,51 +357,29 @@ export default function App() {
     setSelectedAgentId(agentId);
   }, []);
 
-  if (!snapshot) {
-    return (
-      <main className="launch-shell">
-        <section className="launch-card">
-          <div className="launch-card__eyebrow"><MapTrifold size={20} weight="duotone" /> НАБЛЮДАТЕЛЬ ЖИВОГО МИРА</div>
-          <h1>Арена цивилизаций</h1>
-          <p>Локальное окно в авторитетный мир. Браузер наблюдает, но не управляет его состоянием.</p>
-          <label>
-            Модель решений
-            <select value={modelKey} onChange={(event) => setModelKey(event.target.value)}>
-              {catalog?.models.map((model) => <option key={`${model.provider}/${model.model}`} value={`${model.provider}/${model.model}`}>{model.label}</option>)}
-            </select>
-          </label>
-          <label>
-            Seed мира
-            <input value={seed} onChange={(event) => setSeed(event.target.value)} inputMode="numeric" />
-          </label>
-          <button className="launch-card__start" type="button" onClick={() => void startRun()} disabled={busy || !selectedModel}>
-            {busy ? <CircleNotch className="spin" size={20} /> : <Play size={20} weight="fill" />} Запустить наблюдение
-          </button>
-          <small>{notice}</small>
-        </section>
-      </main>
-    );
-  }
+  const isCompleted = snapshot?.run.status === "completed";
 
   return (
     <main className="observer-shell">
       <header className="topbar">
         <div className="brand-lockup">
           <span className="brand-lockup__signal" />
-          <div><strong>АРЕНА ЦИВИЛИЗАЦИЙ</strong><small>Локальный наблюдатель общества</small></div>
+          <div><strong>АРЕНА ЦИВИЛИЗАЦИЙ</strong><small>Локальная лаборатория живого мира</small></div>
         </div>
         <div className="world-status">
-          <span><CloudRain size={16} weight="duotone" /> {snapshot.environment.weather}</span>
-          <span>{snapshot.environment.temperature_c.toLocaleString("ru-RU")} °C{snapshot.environment.crisis ? " · КРИЗИС" : ""}</span>
-          <strong>ДЕНЬ {snapshot.environment.day}</strong>
-          <span>{snapshot.environment.clock}</span>
+          {snapshot ? <>
+            <span><CloudRain size={16} weight="duotone" /> {snapshot.environment.weather}</span>
+            <span>{snapshot.environment.temperature_c.toLocaleString("ru-RU")} °C{snapshot.environment.crisis ? " · КРИЗИС" : ""}</span>
+            <strong>{isCompleted ? "ЭКСПЕРИМЕНТ ЗАВЕРШЁН" : `ДЕНЬ ${snapshot.environment.day}`}</strong>
+            <span>{snapshot.environment.clock}</span>
+          </> : <span><MapTrifold size={16} weight="duotone" /> Выберите или создайте мир</span>}
         </div>
         <div className="topbar__controls">
-          <button type="button" className="icon-button" onClick={() => void control({ paused: !snapshot.run.paused })} title={snapshot.run.paused ? "Продолжить" : "Пауза"}>
-            {snapshot.run.paused ? <Play size={19} weight="fill" /> : <Pause size={19} weight="fill" />}
+          <button type="button" className="icon-button" disabled={!snapshot || isCompleted} onClick={() => snapshot && void control({ paused: !snapshot.run.paused })} title={!snapshot ? "Сначала создайте или откройте мир" : isCompleted ? "Эксперимент завершён" : snapshot.run.paused ? "Продолжить" : "Пауза"}>
+            {!snapshot || snapshot.run.paused ? <Play size={19} weight="fill" /> : <Pause size={19} weight="fill" />}
           </button>
-          {[1, 3, 10].map((speed) => <button className={snapshot.run.speed === speed ? "speed-button is-active" : "speed-button"} key={speed} type="button" onClick={() => void control({ speed })}>×{speed}</button>)}
-          <button type="button" className="icon-button" onClick={() => void saveCurrent()} title="Сохранить"><FloppyDisk size={19} weight="duotone" /></button>
+          {[1, 3, 10].map((speed) => <button className={snapshot?.run.speed === speed ? "speed-button is-active" : "speed-button"} disabled={!snapshot || isCompleted} key={speed} type="button" onClick={() => void control({ speed })}>×{speed}</button>)}
+          <button type="button" className="icon-button" disabled={!snapshot} onClick={() => void saveCurrent()} title="Сохранить"><FloppyDisk size={19} weight="duotone" /></button>
           <select className="snapshot-select" value={selectedSnapshot} onChange={(event) => setSelectedSnapshot(event.target.value)} aria-label="Выбрать сохранение">
             <option value="">Сохранения</option>
             {snapshots.map((name) => <option key={name} value={name}>{name}</option>)}
@@ -301,47 +389,80 @@ export default function App() {
       </header>
 
       <aside className="agent-rail">
-        <div className="section-heading"><span>АГЕНТЫ</span><small>{snapshot.agents.length}</small></div>
+        <section className="experiment-panel">
+          <div className="section-heading"><span>ЭКСПЕРИМЕНТЫ</span><small>{liveRuns.length} активн.</small></div>
+          <label>
+            Сценарий
+            <select value={modelKey} onChange={(event) => setModelKey(event.target.value)}>
+              {catalog?.models.map((model) => <option key={`${model.provider}/${model.model}`} value={`${model.provider}/${model.model}`}>{model.label}</option>)}
+            </select>
+          </label>
+          <p>{selectedModel?.description ?? "Загружаем доступные сценарии…"}</p>
+          <label>
+            Seed нового мира
+            <input value={seed} onChange={(event) => setSeed(event.target.value)} inputMode="numeric" />
+          </label>
+          <button className="experiment-panel__start" type="button" onClick={() => void createOrContinueRun()} disabled={busy || !selectedModel}>
+            {busy ? <CircleNotch className="spin" size={18} /> : <Play size={18} weight="fill" />} {busy ? "Подготовка…" : "Создать или открыть мир"}
+          </button>
+          <small>Новый seed создаёт отдельный мир; тот же seed открывает его прежнюю историю.</small>
+          {liveRuns.length > 0 && <div className="experiment-panel__open">
+            <label>
+              Открытые миры
+              <select value={selectedLiveRunId} onChange={(event) => setSelectedLiveRunId(event.target.value)}>
+                {liveRuns.map((run) => <option key={run.run_id} value={run.run_id}>{liveRunLabel(run)}</option>)}
+              </select>
+            </label>
+            <button type="button" className="experiment-panel__open-button" disabled={busy || !selectedLiveRunId} onClick={() => void openExistingRun(selectedLiveRunId)}>Открыть выбранный</button>
+          </div>}
+        </section>
+        <div className="section-heading"><span>АГЕНТЫ</span><small>{snapshot?.agents.length ?? 0}</small></div>
         <div className="agent-list">
-          {snapshot.agents.map((agent, index) => <AgentCard key={agent.id} agent={agent} index={index} selected={agent.id === selectedAgentId} onSelect={() => chooseAgent(agent.id)} />)}
+          {snapshot
+            ? snapshot.agents.map((agent, index) => <AgentCard key={agent.id} agent={agent} index={index} selected={agent.id === selectedAgentId} onSelect={() => chooseAgent(agent.id)} />)
+            : <p className="agent-list__empty">Здесь появятся личности выбранного мира.</p>}
         </div>
-        <div className={`connection connection--${connection}`}><span />{connection === "live" ? "Поток подключён" : connection === "connecting" ? "Подключение…" : "Поток отключён"}</div>
+        <div className={`connection connection--${snapshot ? connection : "idle"}`}><span />{snapshot ? (connection === "live" ? "Поток подключён" : connection === "connecting" ? "Подключение…" : "Поток отключён") : "Мир ещё не открыт"}</div>
       </aside>
 
       <section className="map-panel">
         <div className="map-panel__heading">
           <span>КАРТА МИРА</span>
-          <small>Seed {snapshot.run.seed} · {snapshot.map.width} × {snapshot.map.height}</small>
-          <span className="map-panel__legend">Перетаскивайте карту для обзора</span>
+          <small>{snapshot ? `Seed ${snapshot.run.seed} · ${snapshot.map.width} × ${snapshot.map.height}` : "Выберите сценарий слева"}</small>
+          <span className="map-panel__legend">{snapshot ? "Перетаскивайте карту для обзора" : "Рабочее пространство эксперимента"}</span>
         </div>
-        <WorldCanvas world={snapshot} selectedAgentId={selectedAgentId} onSelectAgent={chooseAgent} />
+        {snapshot
+          ? <WorldCanvas world={snapshot} selectedAgentId={selectedAgentId} onSelectAgent={chooseAgent} />
+          : <div className="world-empty"><MapTrifold size={36} weight="duotone" /><strong>Мир ждёт запуска</strong><p>Выберите готовый сценарий или задайте seed для нового мира. Карта, агенты и хроника появятся здесь.</p></div>}
         <div className="map-panel__footer">
           <span><i className="legend-swatch legend-swatch--grass" />суша</span>
           <span><i className="legend-swatch legend-swatch--water" />вода</span>
           <span><i className="legend-swatch legend-swatch--forest" />лес</span>
           <span><i className="legend-swatch legend-swatch--rock" />камень</span>
-          <small>Погода влияет на холод и здоровье; кризис фиксируется в хронике.</small>
+          <small>{isCompleted ? "Эксперимент завершён: карта и хроника доступны для анализа и сохранения." : snapshot ? "Погода влияет на холод и здоровье; кризис фиксируется в хронике." : "Исследователь управляет запуском и временем, но не скрыто меняет мир."}</small>
         </div>
       </section>
 
       <aside className="chronicle-rail">
-        <div className="chronicle-clock"><small>ВРЕМЯ МИРА</small><strong>{snapshot.environment.clock}</strong><span>День {snapshot.environment.day}</span></div>
-        <div className="section-heading"><span>ХРОНИКА</span><small>{snapshot.events.length}</small></div>
+        <div className="chronicle-clock"><small>ВРЕМЯ МИРА</small><strong>{snapshot?.environment.clock ?? "—"}</strong><span>{snapshot ? `День ${snapshot.environment.day}` : "Мир не запущен"}</span></div>
+        <div className="section-heading"><span>ХРОНИКА</span><small>{snapshot?.events.length ?? 0}</small></div>
         <ol className="event-list">
-          {[...snapshot.events].reverse().map((event) => <li key={event.id}><time>{gameTime(event.minute).replace("День ", "Д")}</time><span>{event.text}</span></li>)}
+          {snapshot
+            ? [...snapshot.events].reverse().map((event) => <li key={event.id}><time>{gameTime(event.minute).replace("День ", "Д")}</time><span>{event.text}</span></li>)
+            : <li className="event-list__empty"><span>После запуска здесь появятся решения агентов, перемещения, сделки и события мира.</span></li>}
         </ol>
         <div className="instrument-panel">
           <div className="section-heading"><span>ПРИБОРЫ</span></div>
-          <p><UsersThree size={16} weight="duotone" />Население <strong>{snapshot.instruments.population}</strong></p>
-          <p><Database size={16} weight="duotone" />Ресурсы <strong>{snapshot.instruments.resources}</strong></p>
-          <p><WarningCircle size={16} weight="duotone" />Обещания <strong>{snapshot.instruments.active_promises}</strong></p>
+          <p><UsersThree size={16} weight="duotone" />Население <strong>{snapshot?.instruments.population ?? "—"}</strong></p>
+          <p><Database size={16} weight="duotone" />Ресурсы <strong>{snapshot?.instruments.resources ?? "—"}</strong></p>
+          <p><WarningCircle size={16} weight="duotone" />Обещания <strong>{snapshot?.instruments.active_promises ?? "—"}</strong></p>
         </div>
       </aside>
 
       <Inspector inspector={inspector} />
       <footer className="observer-footer">
-        <span>{notice}</span>
-        <small>{snapshot.run.modified ? "Загруженный запуск: история помечена как импортированная." : "Авторитетный мир работает независимо от интерфейса."}</small>
+        <span aria-live="polite">{notice}</span>
+        <small>{snapshot ? (snapshot.run.modified ? "История содержит зафиксированное вмешательство." : "Мир работает независимо от открытого интерфейса.") : "Готовый сценарий — это выбор, а не обязательный режим."}</small>
       </footer>
     </main>
   );

@@ -14,6 +14,8 @@ export type WorldSnapshot = {
   run: {
     id: string;
     seed: number;
+    scenario: string;
+    status: "created" | "running" | "paused" | "completed";
     paused: boolean;
     speed: number;
     processed_events: number;
@@ -72,4 +74,15 @@ export type AgentInspector = {
 export type Catalog = {
   models: Array<{ provider: string; model: string; label: string; description: string }>;
   agent_names: string[];
+};
+
+export type LiveRun = {
+  run_id: string;
+  seed: number;
+  scenario: string;
+  status: "created" | "running" | "paused" | "completed";
+  paused: boolean;
+  speed: number;
+  game_minute: number;
+  processed_events: number;
 };

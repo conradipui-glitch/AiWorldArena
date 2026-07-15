@@ -61,6 +61,23 @@ def test_snapshot_name_rejects_path_traversal(tmp_path) -> None:
         )
 
 
+def test_snapshot_save_never_silently_overwrites_a_checkpoint(tmp_path) -> None:
+    engine = new_engine()
+    repository = SnapshotRepository(tmp_path)
+    repository.save(
+        "checkpoint",
+        state=engine.state,
+        events=engine.event_log.events,
+    )
+
+    with pytest.raises(SnapshotError, match="already exists"):
+        repository.save(
+            "checkpoint",
+            state=engine.state,
+            events=engine.event_log.events,
+        )
+
+
 def test_snapshot_detects_state_tampering(tmp_path) -> None:
     engine = new_engine()
     engine.run(20)

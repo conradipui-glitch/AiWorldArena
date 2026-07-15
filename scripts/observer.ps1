@@ -16,21 +16,74 @@ function Test-Listener {
     return $null -ne (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1)
 }
 
-function Test-ApiHealth {
+function Test-ApiCompatibility {
     param([int]$Port)
 
     try {
         $Health = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/health" -TimeoutSec 2
-        return $Health.status -eq 'ok'
+        if ($Health.status -ne 'ok' -or $Health.observer_api -ne 'workspace-v1') {
+            return $false
+        }
+        $Worlds = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/v1/runs" -TimeoutSec 2
+        return $null -ne $Worlds.PSObject.Properties['runs']
     } catch {
         return $false
     }
 }
 
+function Get-ListenerOwnerId {
+    param([int]$Port)
+
+    return Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
+        Select-Object -First 1 -ExpandProperty OwningProcess
+}
+
+function Test-OwnedObserverPair {
+    $ApiOwnerId = Get-ListenerOwnerId -Port $ApiPort
+    $UiOwnerId = Get-ListenerOwnerId -Port $UiPort
+    if ($null -eq $ApiOwnerId -or $null -eq $UiOwnerId) {
+        return $false
+    }
+
+    $ApiProcess = Get-CimInstance Win32_Process -Filter "ProcessId = $ApiOwnerId" -ErrorAction SilentlyContinue
+    $UiProcess = Get-CimInstance Win32_Process -Filter "ProcessId = $UiOwnerId" -ErrorAction SilentlyContinue
+    if ($null -eq $ApiProcess -or $null -eq $UiProcess) {
+        return $false
+    }
+
+    $ApiCommand = ([string]$ApiProcess.CommandLine).ToLowerInvariant()
+    $UiCommand = ([string]$UiProcess.CommandLine).Replace('/', '\').ToLowerInvariant()
+    $ExpectedUiRoot = (Join-Path $Root 'client\node_modules').ToLowerInvariant()
+    return (
+        $ApiCommand.Contains('ai_society.api.app:app') -and
+        $UiCommand.Contains($ExpectedUiRoot) -and
+        $UiCommand.Contains('vite')
+    )
+}
+
+function Stop-OwnedObserverPair {
+    $ProcessIds = @(
+        (Get-ListenerOwnerId -Port $ApiPort),
+        (Get-ListenerOwnerId -Port $UiPort)
+    ) | Where-Object { $null -ne $_ } | Select-Object -Unique
+    foreach ($ProcessId in $ProcessIds) {
+        Stop-Process -Id $ProcessId -Force -ErrorAction Stop
+    }
+
+    $Deadline = (Get-Date).AddSeconds(5)
+    while ((Get-Date) -lt $Deadline) {
+        if (-not (Test-Listener -Port $ApiPort) -and -not (Test-Listener -Port $UiPort)) {
+            return
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    throw 'Устаревшие локальные процессы не освободили порты за 5 секунд.'
+}
+
 $ApiAlreadyListening = Test-Listener -Port $ApiPort
 $UiAlreadyListening = Test-Listener -Port $UiPort
 if ($ApiAlreadyListening -or $UiAlreadyListening) {
-    if ($ApiAlreadyListening -and $UiAlreadyListening -and (Test-ApiHealth -Port $ApiPort)) {
+    if ($ApiAlreadyListening -and $UiAlreadyListening -and (Test-ApiCompatibility -Port $ApiPort)) {
         Write-Output "Наблюдатель уже готов: $UiUrl"
         if ($OpenBrowser) {
             Start-Process $UiUrl
@@ -38,14 +91,23 @@ if ($ApiAlreadyListening -or $UiAlreadyListening) {
         return
     }
 
-    $OccupiedPorts = @()
-    if ($ApiAlreadyListening) {
-        $OccupiedPorts += $ApiPort
+    if ($ApiAlreadyListening -and $UiAlreadyListening -and (Test-OwnedObserverPair)) {
+        Write-Output 'Найдена устаревшая локальная версия. Перезапускаю наблюдатель...'
+        Stop-OwnedObserverPair
+        $ApiAlreadyListening = $false
+        $UiAlreadyListening = $false
     }
-    if ($UiAlreadyListening) {
-        $OccupiedPorts += $UiPort
+
+    if ($ApiAlreadyListening -or $UiAlreadyListening) {
+        $OccupiedPorts = @()
+        if ($ApiAlreadyListening) {
+            $OccupiedPorts += $ApiPort
+        }
+        if ($UiAlreadyListening) {
+            $OccupiedPorts += $UiPort
+        }
+        throw "Порты $($OccupiedPorts -join ', ') уже заняты, но совместимый наблюдатель не найден. Освободите их или задайте AIWORLD_API_PORT и AIWORLD_UI_PORT."
     }
-    throw "Порты $($OccupiedPorts -join ', ') уже заняты, но готовый наблюдатель не найден. Освободите их или задайте AIWORLD_API_PORT и AIWORLD_UI_PORT."
 }
 
 $Python = Join-Path $Root '.venv\Scripts\python.exe'
@@ -93,7 +155,7 @@ try {
         try {
             $Health = Invoke-RestMethod -Uri "http://127.0.0.1:$ApiPort/health" -TimeoutSec 2
             $UiReady = Test-NetConnection -ComputerName '127.0.0.1' -Port $UiPort -InformationLevel Quiet -WarningAction SilentlyContinue
-            if ($Health.status -eq 'ok' -and $UiReady) {
+            if ((Test-ApiCompatibility -Port $ApiPort) -and $UiReady) {
                 $Ready = $true
                 break
             }

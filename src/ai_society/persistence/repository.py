@@ -46,6 +46,8 @@ class SnapshotRepository:
         path = self._path_for(name)
         if path.is_symlink():
             raise SnapshotError("snapshot target cannot be a symbolic link")
+        if path.exists():
+            raise SnapshotError("snapshot already exists")
         event_log = EventLog(events)
         envelope = SnapshotEnvelope(
             state_hash=canonical_digest(state),

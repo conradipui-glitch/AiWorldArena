@@ -115,6 +115,19 @@ class ObserverRunConfig:
     model: str = "scripted-v1"
 
 
+@dataclass(frozen=True, slots=True)
+class RunAcquisition:
+    """The result of opening a deterministic observer run.
+
+    A deterministic configuration names one logical world.  Reopening that
+    configuration must therefore return the existing live world rather than
+    failing with a duplicate-creation error.
+    """
+
+    engine: SimulationEngine
+    reused: bool
+
+
 @dataclass(slots=True)
 class ObserverSession:
     engine: SimulationEngine
@@ -145,8 +158,14 @@ class RunRegistry:
         self._tick_seconds = tick_seconds
         self._serial = 0
         self._closed = False
+        # A world can be replaced when a checkpoint is loaded.  This lock
+        # serializes that replacement with advancing and control operations,
+        # so a request cannot keep using a cognition repository after it has
+        # been retired.
+        self._lifecycle_lock = asyncio.Lock()
 
-    async def create(self, config: ObserverRunConfig) -> SimulationEngine:
+    async def acquire(self, config: ObserverRunConfig) -> RunAcquisition:
+        """Create a live world once, then reopen it by deterministic identity."""
         if config.provider != "deterministic" or config.model not in {
             "scripted-v1",
             "scripted-experiment-v1",
@@ -172,13 +191,19 @@ class RunRegistry:
                 agent_names=config.agents,
             )
             policy = ScriptedPolicy()
-        if world.run.run_id in self._runs:
-            raise ValueError("идентичный детерминированный запуск уже существует")
-        engine = SimulationEngine(state=world, policy=policy)
-        session = self._new_session(engine)
-        self._runs[world.run.run_id] = session
-        await self._refresh_cognition(session)
-        return engine
+        async with self._lifecycle_lock:
+            existing = self._runs.get(world.run.run_id)
+            if existing is not None:
+                return RunAcquisition(engine=existing.engine, reused=True)
+            engine = SimulationEngine(state=world, policy=policy)
+            session = self._new_session(engine)
+            self._runs[world.run.run_id] = session
+            await self._refresh_cognition(session)
+            return RunAcquisition(engine=engine, reused=False)
+
+    async def create(self, config: ObserverRunConfig) -> SimulationEngine:
+        """Compatibility helper for callers that only need the live engine."""
+        return (await self.acquire(config)).engine
 
     def get(self, run_id: str) -> ObserverSession:
         try:
@@ -186,36 +211,72 @@ class RunRegistry:
         except KeyError as exc:
             raise LookupError(run_id) from exc
 
+    def list_runs(self) -> list[dict[str, str | int | bool]]:
+        """Return the live worlds that the local laboratory can reopen.
+
+        This is deliberately a compact projection: it identifies an existing
+        world and its time state, but it never exposes client-side mutation of
+        authoritative state.
+        """
+        return [
+            {
+                "run_id": run_id,
+                "seed": session.engine.state.seed,
+                "paused": session.paused,
+                "speed": session.speed,
+                "game_minute": session.engine.state.game_minute,
+                "processed_events": session.engine.state.processed_events,
+                "status": session.engine.state.run.status.value,
+                "scenario": self._scenario_label(session.engine),
+            }
+            for run_id, session in self._runs.items()
+        ]
+
     async def advance(self, run_id: str, events: int) -> int:
-        session = self.get(run_id)
-        async with session.advance_lock:
-            completed = 0
-            for _ in range(events):
-                result = session.engine.step()
-                if result is None:
-                    session.paused = True
-                    break
-                completed += 1
-                self._record_action(session, result)
-            await self._refresh_cognition(session)
+        # This endpoint is the explicit deterministic single-step mechanism
+        # used by tests and later researcher tooling.  Browser pause controls
+        # never call it, so a paused observer remains visually and autonomously
+        # still until the researcher resumes it.
+        async with self._lifecycle_lock:
+            session = self.get(run_id)
+            async with session.advance_lock:
+                completed = 0
+                for _ in range(events):
+                    result = session.engine.step()
+                    if result is None:
+                        session.paused = True
+                        break
+                    completed += 1
+                    self._record_action(session, result)
+                await self._refresh_cognition(session)
         await self.publish(run_id)
         return completed
 
     async def set_controls(
         self, run_id: str, *, paused: bool | None, speed: int | None
     ) -> ObserverSession:
-        session = self.get(run_id)
-        if speed is not None:
-            if speed not in {1, 3, 10}:
-                raise ValueError("скорость должна быть 1, 3 или 10")
-            session.speed = speed
-        if paused is not None:
-            session.paused = paused
-            session.engine.state.run.status = (
-                RunStatus.PAUSED if paused else RunStatus.RUNNING
-            )
-            if not paused:
-                self._ensure_loop(run_id, session)
+        # A control takes effect between complete world events.  In particular,
+        # a pause cannot race a speed batch and leave a seemingly paused world
+        # progressing in the background.
+        async with self._lifecycle_lock:
+            session = self.get(run_id)
+            async with session.advance_lock:
+                if speed is not None:
+                    if speed not in {1, 3, 10}:
+                        raise ValueError("скорость должна быть 1, 3 или 10")
+                    session.speed = speed
+                if paused is not None:
+                    if session.engine.state.run.status is RunStatus.COMPLETED:
+                        session.paused = True
+                        if not paused:
+                            raise ValueError("этот эксперимент уже завершён")
+                    else:
+                        session.paused = paused
+                        session.engine.state.run.status = (
+                            RunStatus.PAUSED if paused else RunStatus.RUNNING
+                        )
+                        if not paused:
+                            self._ensure_loop(run_id, session)
         await self.publish(run_id)
         return session
 
@@ -240,17 +301,24 @@ class RunRegistry:
             events=envelope.events,
             policy=policy,
         )
-        engine.mark_snapshot_imported(
-            source_state_hash=envelope.state_hash,
-            source_event_digest=envelope.event_digest,
-        )
         run_id = engine.state.run.run_id
-        prior = self._runs.pop(run_id, None)
-        if prior is not None:
-            await self._retire(prior)
-        session = self._new_session(engine)
-        self._runs[run_id] = session
-        await self._refresh_cognition(session)
+        async with self._lifecycle_lock:
+            # Loading a normal local checkpoint opens it at a stable boundary.
+            # The researcher explicitly resumes time from the observer controls.
+            # A completed checkpoint retains that terminal status instead.
+            if engine.state.run.status is not RunStatus.COMPLETED:
+                engine.state.run.status = RunStatus.PAUSED
+            prior = self._runs.get(run_id)
+            subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
+            if prior is not None:
+                subscribers = prior.subscribers
+                prior.subscribers = set()
+                await self._retire(prior)
+            session = self._new_session(engine)
+            session.subscribers = subscribers
+            session.paused = True
+            self._runs[run_id] = session
+            await self._refresh_cognition(session)
         await self.publish(run_id)
         return engine
 
@@ -359,11 +427,12 @@ class RunRegistry:
                 continue
 
     async def shutdown(self) -> None:
-        self._closed = True
-        sessions = list(self._runs.values())
-        self._runs.clear()
-        for session in sessions:
-            await self._retire(session)
+        async with self._lifecycle_lock:
+            self._closed = True
+            sessions = list(self._runs.values())
+            self._runs.clear()
+            for session in sessions:
+                await self._retire(session)
 
     def _new_session(self, engine: SimulationEngine) -> ObserverSession:
         self._serial += 1
@@ -376,6 +445,12 @@ class RunRegistry:
             cognition=cognition,
             projector=CognitionProjector(cognition, DeterministicEmbeddingProvider()),
         )
+
+    @staticmethod
+    def _scenario_label(engine: SimulationEngine) -> str:
+        if engine.state.run.rules_version == "block4-v1":
+            return "Остров: три агента, семь дней"
+        return "Свободный мир"
 
     async def _retire(self, session: ObserverSession) -> None:
         if session.task is not None and not session.task.done():
@@ -401,7 +476,10 @@ class RunRegistry:
                     return
                 if not session.paused:
                     await self.advance(run_id, session.speed)
-                await asyncio.sleep(self._tick_seconds / max(session.speed, 1))
+                # Speed changes the amount of game time processed per real-time
+                # tick.  Dividing the delay as well would make ×3 and ×10 run
+                # at 9× and 100× respectively.
+                await asyncio.sleep(self._tick_seconds)
         except asyncio.CancelledError:
             raise
 
@@ -496,6 +574,8 @@ class RunRegistry:
             "run": {
                 "id": state.run.run_id,
                 "seed": state.seed,
+                "scenario": self._scenario_label(engine),
+                "status": state.run.status.value,
                 "paused": session.paused,
                 "speed": session.speed,
                 "processed_events": state.processed_events,

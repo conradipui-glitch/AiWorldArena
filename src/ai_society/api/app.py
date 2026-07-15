@@ -4,7 +4,14 @@ import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi import (
+    FastAPI,
+    HTTPException,
+    Response,
+    WebSocket,
+    WebSocketDisconnect,
+    status,
+)
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ai_society.api.observer import ObserverRunConfig, RunRegistry
@@ -107,7 +114,11 @@ def create_app(
 
     @app.get("/health")
     async def health() -> dict[str, str]:
-        return {"status": "ok", "engine": "block5"}
+        return {
+            "status": "ok",
+            "engine": "block5",
+            "observer_api": "workspace-v1",
+        }
 
     @app.get("/v1/experiments")
     async def list_experiments() -> dict[str, object]:
@@ -184,18 +195,32 @@ def create_app(
             "models": [
                 {
                     "provider": "deterministic",
+                    "model": "scripted-v1",
+                    "label": "Свободный мир",
+                    "description": (
+                        "Новый процедурный мир без семидневного финала. "
+                        "Выберите свой seed и наблюдайте, как он развивается."
+                    ),
+                },
+                {
+                    "provider": "deterministic",
                     "model": "scripted-experiment-v1",
-                    "label": "Эксперимент: три агента, семь дней",
-                    "description": "Локальный прогон с погодным кризисом и социальными эпизодами.",
+                    "label": "Остров: три агента, семь дней",
+                    "description": (
+                        "Готовый воспроизводимый сценарий с погодным кризисом "
+                        "и социальными эпизодами."
+                    ),
                 }
             ],
             "agent_names": ["Ада", "Борин", "Сайра"],
         }
 
     @app.post("/v1/runs", status_code=status.HTTP_201_CREATED)
-    async def create_run(request: CreateRunRequest) -> dict[str, str | int]:
+    async def create_run(
+        request: CreateRunRequest, response: Response
+    ) -> dict[str, str | int | bool]:
         try:
-            engine = await registry.create(
+            acquisition = await registry.acquire(
                 ObserverRunConfig(
                     seed=request.seed,
                     width=request.width,
@@ -205,9 +230,16 @@ def create_app(
                     model=request.model,
                 )
             )
-            return engine.summary()
+            if acquisition.reused:
+                response.status_code = status.HTTP_200_OK
+            return {**acquisition.engine.summary(), "reused": acquisition.reused}
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.get("/v1/runs")
+    async def list_runs() -> dict[str, list[dict[str, str | int | bool]]]:
+        """List live worlds so reopening the local app never hides one."""
+        return {"runs": registry.list_runs()}
 
     @app.post("/v1/runs/{run_id}/advance")
     async def advance_run(run_id: str, request: AdvanceRunRequest) -> dict[str, str | int]:
