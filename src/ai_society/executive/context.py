@@ -3,7 +3,16 @@ from __future__ import annotations
 from pydantic import BaseModel, ConfigDict, Field
 
 from ai_society.cognition.models import BeliefRecord, MemoryRecord
-from ai_society.domain.enums import CommitmentStatus, OfferStatus, ResourceKind, TerrainType
+from ai_society.domain.enums import (
+    CommitmentStatus,
+    OfferStatus,
+    ProjectMemberStatus,
+    ProjectStatus,
+    ResourceKind,
+    StructureKind,
+    TerrainType,
+    WeatherKind,
+)
 from ai_society.domain.models import AgentBodyState, AgentObservation, Position
 from ai_society.persistence.canonical import canonical_digest, canonical_json
 
@@ -43,6 +52,14 @@ class PromptVisibleAgent(PromptModel):
     agent_id: str
     name: str
     position: Position
+
+
+class PromptStructure(PromptModel):
+    structure_id: str
+    kind: StructureKind
+    position: Position
+    stored_resources: dict[ResourceKind, int]
+    available_capacity: int
 
 
 class PromptMemory(PromptModel):
@@ -97,6 +114,24 @@ class PromptCommitment(PromptModel):
     provenance: str
 
 
+class PromptEnvironment(PromptModel):
+    weather: WeatherKind
+    ambient_temperature_milli_c: int
+    crisis: bool
+
+
+class PromptProject(PromptModel):
+    project_id: str
+    creator_id: str
+    structure_kind: StructureKind
+    location: Position
+    status: ProjectStatus
+    own_status: ProjectMemberStatus
+    required_resources: dict[ResourceKind, int]
+    total_contributions: dict[ResourceKind, int]
+    version: int
+
+
 class AgentPromptContext(PromptModel):
     context_version: str = "agent-prompt-v1"
     untrusted_data_notice: str = (
@@ -106,10 +141,12 @@ class AgentPromptContext(PromptModel):
     game_minute: int
     agent: PromptAgent
     body: AgentBodyState
+    environment: PromptEnvironment
     position: Position
     inventory: tuple[PromptInventoryItem, ...]
     visible_tiles: tuple[PromptTile, ...]
     visible_resources: tuple[PromptResource, ...]
+    visible_structures: tuple[PromptStructure, ...]
     visible_agents: tuple[PromptVisibleAgent, ...]
     known_positions: tuple[Position, ...]
     retrieved_memories: tuple[PromptMemory, ...]
@@ -117,6 +154,7 @@ class AgentPromptContext(PromptModel):
     delivered_messages: tuple[PromptMessage, ...]
     accessible_offers: tuple[PromptOffer, ...]
     accessible_commitments: tuple[PromptCommitment, ...]
+    accessible_projects: tuple[PromptProject, ...]
 
     @property
     def canonical_json(self) -> str:
@@ -148,6 +186,7 @@ class AgentContextBuilder:
         messages = observation.delivered_messages[-10:]
         offers = observation.accessible_offers[-10:]
         commitments = observation.accessible_commitments[-10:]
+        projects = observation.accessible_projects[-10:]
         return AgentPromptContext(
             run_id=observation.run_id,
             game_minute=observation.game_minute,
@@ -157,6 +196,13 @@ class AgentContextBuilder:
                 long_term_goal=observation.long_term_goal,
             ),
             body=observation.body.model_copy(deep=True),
+            environment=PromptEnvironment(
+                weather=observation.environment.weather,
+                ambient_temperature_milli_c=(
+                    observation.environment.ambient_temperature_milli_c
+                ),
+                crisis=observation.environment.crisis,
+            ),
             position=observation.position,
             inventory=tuple(
                 PromptInventoryItem(resource=resource, amount=amount)
@@ -183,6 +229,18 @@ class AgentContextBuilder:
                     visible_quantity=node.quantity,
                 )
                 for node in observation.visible_resources[:64]
+            ),
+            visible_structures=tuple(
+                PromptStructure(
+                    structure_id=structure.structure_id,
+                    kind=structure.kind,
+                    position=structure.position,
+                    stored_resources=dict(structure.inventory),
+                    available_capacity=max(
+                        0, structure.capacity - sum(structure.inventory.values())
+                    ),
+                )
+                for structure in observation.visible_structures[:30]
             ),
             visible_agents=tuple(
                 PromptVisibleAgent(
@@ -250,5 +308,25 @@ class AgentContextBuilder:
                     provenance=commitment.provenance,
                 )
                 for commitment in commitments
+            ),
+            accessible_projects=tuple(
+                PromptProject(
+                    project_id=project.project_id,
+                    creator_id=project.creator_id,
+                    structure_kind=project.structure_kind,
+                    location=project.location,
+                    status=project.status,
+                    own_status=project.member_status[observation.agent_id],
+                    required_resources=dict(project.required_resources),
+                    total_contributions={
+                        resource: sum(
+                            contribution.get(resource, 0)
+                            for contribution in project.contributions.values()
+                        )
+                        for resource in project.required_resources
+                    },
+                    version=project.version,
+                )
+                for project in projects
             ),
         )

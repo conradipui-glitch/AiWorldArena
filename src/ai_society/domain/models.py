@@ -8,11 +8,14 @@ from ai_society.domain.enums import (
     IntelligenceTier,
     MessageStatus,
     OfferStatus,
+    ProjectMemberStatus,
+    ProjectStatus,
     ResourceKind,
     RunStatus,
     ScheduledEventKind,
     StructureKind,
     TerrainType,
+    WeatherKind,
 )
 from ai_society.domain.events import ScheduledEvent
 
@@ -112,6 +115,103 @@ class Structure(StrictModel):
     position: Position
     builder_id: str = Field(pattern=r"^agent-[0-9]{3}$")
     created_minute: int = Field(ge=0)
+    contributor_ids: list[str] = Field(default_factory=list, max_length=100)
+    inventory: dict[ResourceKind, int] = Field(default_factory=dict)
+    capacity: int = Field(default=0, ge=0, le=100_000)
+
+    @field_validator("inventory")
+    @classmethod
+    def stored_resources_are_bounded(
+        cls, value: dict[ResourceKind, int]
+    ) -> dict[ResourceKind, int]:
+        if any(amount < 0 or amount > 1_000_000 for amount in value.values()):
+            raise ValueError("stored resource values must be within safe bounds")
+        return value
+
+    @model_validator(mode="after")
+    def storage_contract_is_coherent(self) -> "Structure":
+        if len(set(self.contributor_ids)) != len(self.contributor_ids):
+            raise ValueError("structure contributors must be unique")
+        stored = sum(self.inventory.values())
+        if stored > self.capacity:
+            raise ValueError("structure inventory exceeds capacity")
+        if self.kind is StructureKind.STORAGE and self.capacity <= 0:
+            raise ValueError("storage must have positive capacity")
+        if self.kind is not StructureKind.STORAGE and (self.capacity or stored):
+            raise ValueError("only storage can contain resources")
+        return self
+
+
+class WeatherTransition(StrictModel):
+    transition_id: str = Field(pattern=r"^weather-[0-9]{4}$")
+    minute: int = Field(ge=1)
+    weather: WeatherKind
+    ambient_temperature_milli_c: int = Field(ge=-50_000, le=60_000)
+    crisis: bool = False
+
+
+class EnvironmentState(StrictModel):
+    weather: WeatherKind = WeatherKind.CLEAR
+    ambient_temperature_milli_c: int = Field(default=18_000, ge=-50_000, le=60_000)
+    crisis: bool = False
+    last_changed_minute: int = Field(default=0, ge=0)
+    transitions: list[WeatherTransition] = Field(default_factory=list, max_length=1_000)
+
+    @model_validator(mode="after")
+    def transitions_are_strictly_ordered(self) -> "EnvironmentState":
+        keys = [(item.minute, item.transition_id) for item in self.transitions]
+        if keys != sorted(keys) or len({item.transition_id for item in self.transitions}) != len(
+            self.transitions
+        ):
+            raise ValueError("weather transitions must be ordered and unique")
+        return self
+
+
+class JointProject(StrictModel):
+    project_id: str = Field(pattern=r"^project-[0-9]{6}$")
+    creator_id: str = Field(pattern=r"^agent-[0-9]{3}$")
+    structure_kind: StructureKind
+    location: Position
+    status: ProjectStatus = ProjectStatus.OPEN
+    member_status: dict[str, ProjectMemberStatus]
+    required_resources: dict[ResourceKind, int]
+    contributions: dict[str, dict[ResourceKind, int]] = Field(default_factory=dict)
+    created_minute: int = Field(ge=0)
+    completed_minute: int | None = Field(default=None, ge=0)
+    version: int = Field(default=1, ge=1)
+
+    @model_validator(mode="after")
+    def project_resources_are_valid(self) -> "JointProject":
+        if self.structure_kind is not StructureKind.STORAGE:
+            raise ValueError("the MVP supports shared storage projects only")
+        if self.member_status.get(self.creator_id) is not ProjectMemberStatus.JOINED:
+            raise ValueError("project creator must remain a joined member")
+        if any(amount <= 0 or amount > 100_000 for amount in self.required_resources.values()):
+            raise ValueError("project requirements must be positive and bounded")
+        if any(
+            amount < 0 or amount > 1_000_000
+            for resources in self.contributions.values()
+            for amount in resources.values()
+        ):
+            raise ValueError("project contributions must be non-negative and bounded")
+        if any(
+            self.member_status.get(agent_id)
+            not in {ProjectMemberStatus.JOINED, ProjectMemberStatus.LEFT}
+            for agent_id in self.contributions
+        ):
+            raise ValueError("only joined project members can contribute")
+        for resource, required in self.required_resources.items():
+            total = sum(
+                contribution.get(resource, 0)
+                for contribution in self.contributions.values()
+            )
+            if total > required:
+                raise ValueError("project contribution exceeds its requirement")
+            if self.status is ProjectStatus.COMPLETED and total < required:
+                raise ValueError("completed project is not fully funded")
+        if (self.status is ProjectStatus.COMPLETED) != (self.completed_minute is not None):
+            raise ValueError("project completion time and status are inconsistent")
+        return self
 
 
 class Message(StrictModel):
@@ -166,9 +266,10 @@ class ExperimentRun(StrictModel):
     mode: ExperimentMode = ExperimentMode.SCRIPTED
     status: RunStatus = RunStatus.CREATED
     modified: bool = False
-    engine_version: str = "0.2.0"
-    rules_version: str = "block2-v1"
-    schema_version: Literal["world-state-v2"] = "world-state-v2"
+    engine_version: str = "0.4.0"
+    rules_version: str = "core-v2"
+    schema_version: Literal["world-state-v2", "world-state-v3"] = "world-state-v3"
+    ends_minute: int | None = Field(default=None, ge=1)
 
 
 class WorldState(StrictModel):
@@ -178,7 +279,7 @@ class WorldState(StrictModel):
     # quadratic in practice.
     model_config = ConfigDict(extra="forbid", validate_assignment=False)
 
-    schema_version: Literal["world-state-v2"] = "world-state-v2"
+    schema_version: Literal["world-state-v2", "world-state-v3"] = "world-state-v3"
     run: ExperimentRun
     seed: int = Field(ge=0, le=2**63 - 1)
     width: int = Field(ge=8, le=512)
@@ -191,12 +292,15 @@ class WorldState(StrictModel):
     messages: dict[str, Message] = Field(default_factory=dict)
     offers: dict[str, TradeOffer] = Field(default_factory=dict)
     commitments: dict[str, Commitment] = Field(default_factory=dict)
+    projects: dict[str, JointProject] = Field(default_factory=dict)
+    environment: EnvironmentState = Field(default_factory=EnvironmentState)
     event_queue: list[ScheduledEvent] = Field(default_factory=list, max_length=1_000_000)
     next_schedule_sequence: int = Field(default=0, ge=0)
     next_structure_sequence: int = Field(default=1, ge=1)
     next_message_sequence: int = Field(default=1, ge=1)
     next_offer_sequence: int = Field(default=1, ge=1)
     next_commitment_sequence: int = Field(default=1, ge=1)
+    next_project_sequence: int = Field(default=1, ge=1)
     processed_events: int = Field(default=0, ge=0)
     rng_state: int = Field(ge=0, le=2**64 - 1)
 
@@ -206,6 +310,9 @@ class WorldState(StrictModel):
 
         def in_bounds(position: Position) -> bool:
             return position.x < self.width and position.y < self.height
+
+        if self.schema_version != self.run.schema_version:
+            raise ValueError("world and run schema versions must match")
 
         if len(self.tiles) != self.width * self.height:
             raise ValueError("tile count does not match world dimensions")
@@ -233,6 +340,8 @@ class WorldState(StrictModel):
                 or not in_bounds(structure.position)
             ):
                 raise ValueError("structure references are inconsistent")
+            if any(agent_id not in self.agents for agent_id in structure.contributor_ids):
+                raise ValueError("structure contributor references are inconsistent")
 
         for key, message in self.messages.items():
             if (
@@ -265,6 +374,16 @@ class WorldState(StrictModel):
             ):
                 raise ValueError("commitment references or timing are inconsistent")
 
+        for key, project in self.projects.items():
+            if (
+                key != project.project_id
+                or project.creator_id not in self.agents
+                or not in_bounds(project.location)
+                or any(agent_id not in self.agents for agent_id in project.member_status)
+                or any(agent_id not in self.agents for agent_id in project.contributions)
+            ):
+                raise ValueError("joint project references are inconsistent")
+
         seen_sequences: set[int] = set()
         subject_maps = {
             ScheduledEventKind.MESSAGE_DELIVERY_DUE: self.messages,
@@ -273,19 +392,37 @@ class WorldState(StrictModel):
             ScheduledEventKind.OFFER_EXPIRY_DUE: self.offers,
             ScheduledEventKind.COMMITMENT_DEADLINE_DUE: self.commitments,
         }
+        weather_transitions = {
+            transition.transition_id: transition
+            for transition in self.environment.transitions
+        }
         for scheduled in self.event_queue:
             if scheduled.sequence in seen_sequences:
                 raise ValueError("scheduled event sequence is duplicated")
             seen_sequences.add(scheduled.sequence)
+            system_event = scheduled.kind in {
+                ScheduledEventKind.WEATHER_CHANGE_DUE,
+                ScheduledEventKind.EXPERIMENT_END_DUE,
+            }
             if (
                 scheduled.sequence >= self.next_schedule_sequence
                 or scheduled.due_minute < self.game_minute
-                or scheduled.actor_id not in self.agents
+                or (
+                    scheduled.actor_id not in self.agents
+                    and not (system_event and scheduled.actor_id == "world")
+                )
             ):
                 raise ValueError("scheduled event metadata is inconsistent")
             if scheduled.kind is ScheduledEventKind.DECISION_DUE:
                 if scheduled.subject_id is not None:
                     raise ValueError("agent decisions cannot carry a subject")
+            elif scheduled.kind is ScheduledEventKind.WEATHER_CHANGE_DUE:
+                transition = weather_transitions.get(scheduled.subject_id or "")
+                if scheduled.actor_id != "world" or transition is None:
+                    raise ValueError("weather event references a missing transition")
+            elif scheduled.kind is ScheduledEventKind.EXPERIMENT_END_DUE:
+                if scheduled.actor_id != "world" or scheduled.subject_id is not None:
+                    raise ValueError("experiment end event metadata is inconsistent")
             else:
                 subjects = subject_maps[scheduled.kind]
                 if scheduled.subject_id not in subjects:
@@ -296,6 +433,7 @@ class WorldState(StrictModel):
             (self.messages, "message_id", self.next_message_sequence),
             (self.offers, "offer_id", self.next_offer_sequence),
             (self.commitments, "commitment_id", self.next_commitment_sequence),
+            (self.projects, "project_id", self.next_project_sequence),
         )
         for values, attribute, next_sequence in sequence_contracts:
             used = [int(getattr(value, attribute).rsplit("-", 1)[1]) for value in values.values()]
@@ -324,9 +462,11 @@ class AgentObservation(StrictModel):
     game_minute: int = Field(ge=0)
     position: Position
     body: AgentBodyState
+    environment: EnvironmentState = Field(default_factory=EnvironmentState)
     inventory: dict[ResourceKind, int]
     visible_tiles: list[Tile]
     visible_resources: list[ResourceNode]
+    visible_structures: list[Structure] = Field(default_factory=list, max_length=100)
     visible_agents: list[VisibleAgent] = Field(default_factory=list, max_length=100)
     known_positions: list[Position]
     delivered_messages: list[Message] = Field(default_factory=list, max_length=100)
@@ -334,6 +474,7 @@ class AgentObservation(StrictModel):
     accessible_commitments: list[Commitment] = Field(
         default_factory=list, max_length=100
     )
+    accessible_projects: list[JointProject] = Field(default_factory=list, max_length=100)
 
 
 class ActionResult(StrictModel):

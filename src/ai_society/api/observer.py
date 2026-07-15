@@ -20,6 +20,11 @@ from ai_society.domain.enums import MemoryLayer, RunStatus, WorldEventKind
 from ai_society.domain.events import WorldEvent
 from ai_society.domain.models import ActionResult
 from ai_society.executive.projector import CognitionProjector
+from ai_society.experiment.models import ExperimentConfig
+from ai_society.experiment.scenario import (
+    ExperimentalScriptedPolicy,
+    create_experiment_world,
+)
 from ai_society.persistence.repository import SnapshotRepository
 from ai_society.simulation.engine import SimulationEngine
 from ai_society.simulation.generation import generate_world
@@ -35,12 +40,19 @@ ACTION_LABELS = {
     "wait": "Ожидание",
     "build_fire": "Строительство костра",
     "build_shelter": "Строительство укрытия",
+    "build_storage": "Строительство хранилища",
+    "store_resource": "Размещение в хранилище",
+    "take_resource": "Получение из хранилища",
     "speak": "Разговор",
     "transfer": "Передача ресурса",
     "create_offer": "Предложение обмена",
     "respond_to_offer": "Ответ на обмен",
     "create_promise": "Создание обещания",
     "resolve_promise": "Завершение обещания",
+    "create_project": "Создание совместного проекта",
+    "respond_to_project": "Ответ на совместный проект",
+    "contribute_to_project": "Вклад в совместный проект",
+    "leave_project": "Выход из совместного проекта",
 }
 
 EVENT_LABELS = {
@@ -53,6 +65,8 @@ EVENT_LABELS = {
     WorldEventKind.AGENT_WAITED: "ожидает",
     WorldEventKind.ACTION_REJECTED: "получает отклонение действия",
     WorldEventKind.STRUCTURE_BUILT: "завершает постройку",
+    WorldEventKind.RESOURCE_STORED: "помещает ресурс в хранилище",
+    WorldEventKind.RESOURCE_TAKEN: "берёт ресурс из хранилища",
     WorldEventKind.MESSAGE_SENT: "отправляет сообщение",
     WorldEventKind.MESSAGE_DELIVERED: "получает сообщение",
     WorldEventKind.MESSAGE_EXPIRED: "теряет сообщение по сроку",
@@ -66,6 +80,16 @@ EVENT_LABELS = {
     WorldEventKind.COMMITMENT_FULFILLED: "выполняет обещание",
     WorldEventKind.COMMITMENT_BROKEN: "нарушает обещание",
     WorldEventKind.COMMITMENT_EXPIRED: "не успевает выполнить обещание",
+    WorldEventKind.PROJECT_CREATED: "создаёт совместный проект",
+    WorldEventKind.PROJECT_JOINED: "присоединяется к совместному проекту",
+    WorldEventKind.PROJECT_REFUSED: "отказывается от совместного проекта",
+    WorldEventKind.PROJECT_LEFT: "выходит из совместного проекта",
+    WorldEventKind.PROJECT_CONTRIBUTION_ADDED: "вносит вклад в совместный проект",
+    WorldEventKind.PROJECT_COMPLETED: "завершает совместный проект",
+    WorldEventKind.WEATHER_CHANGED: "наблюдает смену погоды",
+    WorldEventKind.WEATHER_CRISIS_STARTED: "сталкивается с погодным кризисом",
+    WorldEventKind.WEATHER_CRISIS_ENDED: "переживает окончание погодного кризиса",
+    WorldEventKind.EXPERIMENT_COMPLETED: "завершает семидневный эксперимент",
     WorldEventKind.MODEL_OUTPUT_REJECTED: "получает отклонённый ответ модели",
     WorldEventKind.MODEL_FALLBACK_USED: "переходит к безопасному действию",
     WorldEventKind.MODEL_REBOUND: "получает новую модель решений",
@@ -123,19 +147,34 @@ class RunRegistry:
         self._closed = False
 
     async def create(self, config: ObserverRunConfig) -> SimulationEngine:
-        if config.provider != "deterministic" or config.model != "scripted-v1":
+        if config.provider != "deterministic" or config.model not in {
+            "scripted-v1",
+            "scripted-experiment-v1",
+        }:
             raise ValueError(
                 "в текущем наблюдателе доступен только локальный сценарный режим"
             )
-        world = generate_world(
-            seed=config.seed,
-            width=config.width,
-            height=config.height,
-            agent_names=config.agents,
-        )
+        if config.model == "scripted-experiment-v1":
+            world = create_experiment_world(
+                ExperimentConfig(
+                    seed=config.seed,
+                    width=config.width,
+                    height=config.height,
+                    agent_names=tuple(config.agents),
+                )
+            )
+            policy = ExperimentalScriptedPolicy()
+        else:
+            world = generate_world(
+                seed=config.seed,
+                width=config.width,
+                height=config.height,
+                agent_names=config.agents,
+            )
+            policy = ScriptedPolicy()
         if world.run.run_id in self._runs:
             raise ValueError("идентичный детерминированный запуск уже существует")
-        engine = SimulationEngine(state=world, policy=ScriptedPolicy())
+        engine = SimulationEngine(state=world, policy=policy)
         session = self._new_session(engine)
         self._runs[world.run.run_id] = session
         await self._refresh_cognition(session)
@@ -191,10 +230,15 @@ class RunRegistry:
 
     async def load_snapshot(self, name: str) -> SimulationEngine:
         envelope = self._snapshot_repository.load(name)
+        policy = (
+            ExperimentalScriptedPolicy()
+            if envelope.state.run.rules_version == "block4-v1"
+            else ScriptedPolicy()
+        )
         engine = SimulationEngine.restore(
             state=envelope.state,
             events=envelope.events,
-            policy=ScriptedPolicy(),
+            policy=policy,
         )
         engine.mark_snapshot_imported(
             source_state_hash=envelope.state_hash,
@@ -422,7 +466,17 @@ class RunRegistry:
         day = state.game_minute // 1_440 + 1
         minute_of_day = state.game_minute % 1_440
         hour, minute = divmod(minute_of_day, 60)
-        weather = self._weather(state.seed, day, hour)
+        weather_labels = {
+            "clear": "Ясно",
+            "rain": "Дождь",
+            "cold_snap": "Резкое похолодание",
+        }
+        if 6 <= hour < 19:
+            night_overlay = 0.0
+        elif 5 <= hour < 21:
+            night_overlay = 0.26
+        else:
+            night_overlay = 0.58
         agents = []
         for agent_id, agent in sorted(state.agents.items()):
             agents.append(
@@ -450,9 +504,11 @@ class RunRegistry:
             "environment": {
                 "day": day,
                 "clock": f"{hour:02d}:{minute:02d}",
-                "weather": weather["label"],
-                "weather_visual_only": True,
-                "night_overlay": weather["night_overlay"],
+                "weather": weather_labels[state.environment.weather.value],
+                "weather_visual_only": not bool(state.environment.transitions),
+                "night_overlay": night_overlay,
+                "temperature_c": state.environment.ambient_temperature_milli_c / 1_000,
+                "crisis": state.environment.crisis,
             },
             "map": {
                 "width": state.width,
@@ -504,18 +560,6 @@ class RunRegistry:
                 ),
             },
         }
-
-    @staticmethod
-    def _weather(seed: int, day: int, hour: int) -> dict[str, str | float]:
-        patterns = ("Ясно", "Лёгкий дождь", "Туман", "Переменная облачность")
-        label = patterns[(seed + day * 7) % len(patterns)]
-        if 6 <= hour < 19:
-            overlay = 0.0
-        elif 5 <= hour < 21:
-            overlay = 0.26
-        else:
-            overlay = 0.58
-        return {"label": label, "night_overlay": overlay}
 
     def _event_projection(
         self, engine: SimulationEngine, event: WorldEvent

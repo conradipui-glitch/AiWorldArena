@@ -92,7 +92,7 @@ def create_app(
 
     app = FastAPI(
         title="AI Society Simulation API",
-        version="0.3.0",
+        version="0.4.0",
         docs_url="/docs",
         redoc_url=None,
         lifespan=lifespan,
@@ -102,7 +102,7 @@ def create_app(
 
     @app.get("/health")
     async def health() -> dict[str, str]:
-        return {"status": "ok", "engine": "block3"}
+        return {"status": "ok", "engine": "block4"}
 
     @app.get("/v1/providers/{provider_id}/models")
     async def list_provider_models(provider_id: str) -> dict[str, object]:
@@ -130,9 +130,9 @@ def create_app(
             "models": [
                 {
                     "provider": "deterministic",
-                    "model": "scripted-v1",
-                    "label": "Сценарный режим (локальный)",
-                    "description": "Детерминированные решения для воспроизводимого MVP.",
+                    "model": "scripted-experiment-v1",
+                    "label": "Эксперимент: три агента, семь дней",
+                    "description": "Локальный прогон с погодным кризисом и социальными эпизодами.",
                 }
             ],
             "agent_names": ["Ада", "Борин", "Сайра"],

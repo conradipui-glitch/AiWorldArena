@@ -25,12 +25,19 @@ class ActionKind(StrEnum):
     WAIT = "wait"
     BUILD_FIRE = "build_fire"
     BUILD_SHELTER = "build_shelter"
+    BUILD_STORAGE = "build_storage"
+    STORE_RESOURCE = "store_resource"
+    TAKE_RESOURCE = "take_resource"
     SPEAK = "speak"
     TRANSFER = "transfer"
     CREATE_OFFER = "create_offer"
     RESPOND_TO_OFFER = "respond_to_offer"
     CREATE_PROMISE = "create_promise"
     RESOLVE_PROMISE = "resolve_promise"
+    CREATE_PROJECT = "create_project"
+    RESPOND_TO_PROJECT = "respond_to_project"
+    CONTRIBUTE_TO_PROJECT = "contribute_to_project"
+    LEAVE_PROJECT = "leave_project"
 
 
 class IntelligenceTier(StrEnum):
@@ -61,11 +68,38 @@ class ScheduledEventKind(StrEnum):
     OFFER_DELIVERY_DUE = "offer_delivery_due"
     OFFER_EXPIRY_DUE = "offer_expiry_due"
     COMMITMENT_DEADLINE_DUE = "commitment_deadline_due"
+    WEATHER_CHANGE_DUE = "weather_change_due"
+    EXPERIMENT_END_DUE = "experiment_end_due"
 
 
 class StructureKind(StrEnum):
     FIRE = "fire"
     SHELTER = "shelter"
+    STORAGE = "storage"
+
+
+class WeatherKind(StrEnum):
+    CLEAR = "clear"
+    RAIN = "rain"
+    COLD_SNAP = "cold_snap"
+
+
+class ProjectStatus(StrEnum):
+    OPEN = "open"
+    COMPLETED = "completed"
+    ABANDONED = "abandoned"
+
+
+class ProjectMemberStatus(StrEnum):
+    INVITED = "invited"
+    JOINED = "joined"
+    REFUSED = "refused"
+    LEFT = "left"
+
+
+class ProjectResponse(StrEnum):
+    JOIN = "join"
+    REFUSE = "refuse"
 
 
 class MessageStatus(StrEnum):
@@ -116,6 +150,8 @@ class WorldEventKind(StrEnum):
     AGENT_WAITED = "agent_waited"
     ACTION_REJECTED = "action_rejected"
     STRUCTURE_BUILT = "structure_built"
+    RESOURCE_STORED = "resource_stored"
+    RESOURCE_TAKEN = "resource_taken"
     MESSAGE_SENT = "message_sent"
     MESSAGE_DELIVERED = "message_delivered"
     MESSAGE_EXPIRED = "message_expired"
@@ -129,6 +165,16 @@ class WorldEventKind(StrEnum):
     COMMITMENT_FULFILLED = "commitment_fulfilled"
     COMMITMENT_BROKEN = "commitment_broken"
     COMMITMENT_EXPIRED = "commitment_expired"
+    PROJECT_CREATED = "project_created"
+    PROJECT_JOINED = "project_joined"
+    PROJECT_REFUSED = "project_refused"
+    PROJECT_LEFT = "project_left"
+    PROJECT_CONTRIBUTION_ADDED = "project_contribution_added"
+    PROJECT_COMPLETED = "project_completed"
+    WEATHER_CHANGED = "weather_changed"
+    WEATHER_CRISIS_STARTED = "weather_crisis_started"
+    WEATHER_CRISIS_ENDED = "weather_crisis_ended"
+    EXPERIMENT_COMPLETED = "experiment_completed"
     MODEL_OUTPUT_REJECTED = "model_output_rejected"
     MODEL_FALLBACK_USED = "model_fallback_used"
     MODEL_REBOUND = "model_rebound"

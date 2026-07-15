@@ -86,6 +86,33 @@
   воспроизводимый `scripted-v1`; подстановка произвольной Ollama-модели в экран
   требует отдельной связки с `ExecutiveRunner` и не имитируется UI.
 
+## Блок 4
+
+| Требование | Проверка | Статус |
+|---|---|---|
+| Три агента с одинаковыми стартовыми ресурсами автономно живут ровно семь дней | `test_seven_day_experiment_exports_metrics_and_replays_exactly` | PASS |
+| Все три агента воспринимают, решают, действуют и сохраняют субъективную карту | `test_seven_day_experiment_exports_metrics_and_replays_exactly` | PASS |
+| Scripted, Natural и Controlled mode имеют явные сравнимые контракты | `test_experiment_modes_enforce_comparable_model_assignments` | PASS |
+| Повторно невалидный model output не останавливает Controlled experiment | `test_controlled_mode_survives_invalid_model_output` | PASS |
+| Дождь и кризисное похолодание являются авторитетными событиями | `test_seven_day_experiment_exports_metrics_and_replays_exactly` | PASS |
+| Совместный проект поддерживает join/refuse, раздельные вклады и завершение | `test_seven_day_experiment_exports_metrics_and_replays_exactly` | PASS |
+| Простое хранилище реально принимает и возвращает ресурсы | `test_seven_day_experiment_exports_metrics_and_replays_exactly` | PASS |
+| Общение, transfer, offer/accept, выполненное и нарушенное обещания наблюдаемы | `test_seven_day_experiment_exports_metrics_and_replays_exactly` | PASS |
+| Atomic bundle содержит world, cognition, decisions, events, metrics и interventions | `test_seven_day_experiment_exports_metrics_and_replays_exactly` | PASS |
+| Exact Decision Replay совпадает по state hash и event digest без provider/network | `test_seven_day_experiment_exports_metrics_and_replays_exactly`; CLI acceptance | PASS |
+| Русскоязычный Observer показывает сценарий и авторитетную погоду | `test_observer_exposes_authoritative_block4_experiment_in_russian` | PASS |
+| CLI запускает эксперимент, экспортирует данные и отдельно проверяет replay | `scripts/experiment.ps1`; CLI acceptance | PASS |
+
+## Результат блока 4
+
+- Acceptance run: seed `20260715`, `48×48`, `10080` минут, `4761` решений.
+- Все три агента живы; один совместный проект завершён; intervention journal пуст и явен.
+- `state_hash=6787183ed2ecb5705af632767c414e746c59050ae8d435bfd3a5ecd3d5b9401e`.
+- `event_digest=881ffd7eae17c64e3e2d1815a5e3dc6378b6fbd6fe7dfa11d260c5f989d249dd`.
+- Exact replay повторно подтверждён с `network_calls=0`.
+- Full Python suite: `88 passed`; total coverage: `88%`.
+- Client: `npx tsc --noEmit` и `npm run build` проходят.
+
 ## Условие завершения
 
 Все обязательные строки блока должны получить `PASS`. Известное ограничение допускается только если оно не скрывает обязательную часть и зафиксировано в этом документе.

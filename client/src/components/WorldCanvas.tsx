@@ -33,6 +33,7 @@ class ObserverScene extends Phaser.Scene {
     ["fire", "shelter"].forEach((name) => {
       this.load.image(`structure-${name}`, `/assets/structure-${name}.png`);
     });
+    this.load.image("structure-storage", "/assets/structure-storage.svg");
     [1, 2, 3].forEach((number) => {
       this.load.image(`agent-${number}`, `/assets/agent-${number}.png`);
     });

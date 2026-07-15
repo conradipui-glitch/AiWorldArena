@@ -25,6 +25,8 @@ export type WorldSnapshot = {
     weather: string;
     weather_visual_only: boolean;
     night_overlay: number;
+    temperature_c: number;
+    crisis: boolean;
   };
   map: {
     width: number;

@@ -125,7 +125,7 @@ export default function App() {
   const [inspector, setInspector] = useState<AgentInspector | null>(null);
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const [seed, setSeed] = useState("20260715");
-  const [modelKey, setModelKey] = useState("deterministic/scripted-v1");
+  const [modelKey, setModelKey] = useState("deterministic/scripted-experiment-v1");
   const [connection, setConnection] = useState<"idle" | "connecting" | "live" | "offline">("idle");
   const [snapshots, setSnapshots] = useState<string[]>([]);
   const [selectedSnapshot, setSelectedSnapshot] = useState("");
@@ -190,8 +190,8 @@ export default function App() {
     try {
       const created = await api.createRun({
         seed: numericSeed,
-        width: 32,
-        height: 32,
+        width: 48,
+        height: 48,
         agents: catalog?.agent_names ?? DEFAULT_NAMES,
         provider: selectedModel.provider,
         model: selectedModel.model,
@@ -282,6 +282,7 @@ export default function App() {
         </div>
         <div className="world-status">
           <span><CloudRain size={16} weight="duotone" /> {snapshot.environment.weather}</span>
+          <span>{snapshot.environment.temperature_c.toLocaleString("ru-RU")} °C{snapshot.environment.crisis ? " · КРИЗИС" : ""}</span>
           <strong>ДЕНЬ {snapshot.environment.day}</strong>
           <span>{snapshot.environment.clock}</span>
         </div>
@@ -319,7 +320,7 @@ export default function App() {
           <span><i className="legend-swatch legend-swatch--water" />вода</span>
           <span><i className="legend-swatch legend-swatch--forest" />лес</span>
           <span><i className="legend-swatch legend-swatch--rock" />камень</span>
-          <small>Визуальная погода не меняет правила мира в этом блоке.</small>
+          <small>Погода влияет на холод и здоровье; кризис фиксируется в хронике.</small>
         </div>
       </section>
 

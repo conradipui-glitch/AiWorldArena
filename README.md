@@ -4,10 +4,11 @@
 
 ## Текущий статус
 
-**Блок 3 — Visual Observer MVP завершён и локально принят.** Авторитетный мир
-по-прежнему может работать без браузера; React + Phaser являются только русскоязычным
-окном наблюдения. Государства, готовые рынки, технологии, поколения и боевая система
-не входят в текущий scope.
+**Блок 4 — Experimental MVP реализован.** Три агента могут автономно прожить семь
+игровых дней на острове, пройти дождь и кризисное похолодание, обмениваться ресурсами,
+давать и нарушать обещания и совместно построить хранилище. React + Phaser остаются
+русскоязычным окном наблюдения, а не источником состояния. Государства, готовые рынки,
+технологии, поколения и боевая система не входят в текущий scope.
 
 ## Быстрый запуск на Windows
 
@@ -44,8 +45,35 @@ Set-Location ..
 смена дня/ночи и погода, событийная хроника, пауза, ×1/×3/×10, выбор режима перед
 запуском, сохранение/загрузка и инспектор субъективного состояния агента. Браузер
 получает read-only WebSocket-снимки и не является источником авторитетного состояния.
+В стартовом сценарии погода уже является авторитетным законом мира и влияет на холод.
 
 Подробная граница клиента и сервера — в `docs/OBSERVER_BLOCK_3.md`.
+
+## Семидневный эксперимент и exact replay
+
+Полный воспроизводимый Scripted Test Mode:
+
+```powershell
+.\scripts\experiment.ps1 -Mode scripted -Name three-agents-seven-days
+```
+
+Команда создаёт один проверяемый JSON bundle в `outputs/experiments/`, экспортирует
+решения, события, финальное состояние, cognition, метрики и журнал вмешательств, а
+затем сразу проверяет exact Decision Replay. Повторная проверка не вызывает сеть:
+
+```powershell
+.\.venv\Scripts\python.exe -m ai_society.cli replay-experiment three-agents-seven-days
+```
+
+Controlled Mode принимает одну общую Ollama-модель, Natural Mode — три назначения:
+
+```powershell
+.\scripts\experiment.ps1 -Mode controlled -Models 'qwen3:8b'
+.\scripts\experiment.ps1 -Mode natural -Models 'qwen3:8b','gemma3:12b','deepseek-r1:8b'
+```
+
+Повторный живой вызов Ollama не считается exact replay: он является новым
+экспериментальным прогоном. Точные контракты — в `docs/EXPERIMENT_BLOCK_4.md`.
 
 Проверки:
 
@@ -94,6 +122,8 @@ snapshot проходит schema, hash-chain и семантическую пр�
 - `docs/checkpoints/BLOCK_1.md` — фактический checkpoint первого блока.
 - `docs/checkpoints/BLOCK_2.md` — состав и статус checkpoint второго блока.
 - `docs/OBSERVER_BLOCK_3.md` — запуск и ограничения Visual Observer MVP.
+- `docs/EXPERIMENT_BLOCK_4.md` — семидневный сценарий, export, метрики и replay.
+- `docs/checkpoints/BLOCK_4.md` — фактический checkpoint четвёртого блока.
 - `docs/smoke/OLLAMA_BLOCK_2.md` — отдельный живой Ollama smoke.
 
 ## Checkpoint policy

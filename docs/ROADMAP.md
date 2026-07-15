@@ -11,11 +11,11 @@ four-layer SQLite memory, compaction/forgetting, subjective beliefs, async messa
 минимальный commitment lifecycle и семантическая проверка snapshot реализованы и приняты полным
 локальным checkpoint-набором.
 
-## Блок 3 — Visual Observer MVP
+## Блок 3 — Visual Observer MVP — COMPLETE
 
 Три визуальных направления Product Design и выбор одного. Затем Phaser-карта, панели, inspector, day/night/weather, WebSocket, reconnect, pause/speed и browser QA.
 
-## Блок 4 — Experimental MVP
+## Блок 4 — Experimental MVP — COMPLETE
 
 Три агента, остров, семь дней; offer/response, transfer, promises, совместный проект, кризис, метрики, export и exact Decision Replay без сети.
 

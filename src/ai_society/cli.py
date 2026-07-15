@@ -10,6 +10,14 @@ from ai_society.cognition.embeddings import DeterministicEmbeddingProvider
 from ai_society.cognition.repository import SQLiteCognitionRepository
 from ai_society.executive.layer import ExecutiveLayer
 from ai_society.executive.runner import ExecutiveRunner
+from ai_society.experiment.models import ExperimentConfig, ModelAssignment
+from ai_society.experiment.persistence import ExperimentBundleRepository
+from ai_society.experiment.runner import ExperimentRunner, replay_bundle
+from ai_society.experiment.scenario import (
+    ExperimentalScriptedPolicy,
+    create_experiment_world,
+)
+from ai_society.domain.enums import ExperimentMode
 from ai_society.persistence.repository import SnapshotRepository
 from ai_society.providers.ollama import (
     OllamaConfig,
@@ -25,6 +33,7 @@ from ai_society.simulation.policies import ScriptedPolicy
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SNAPSHOT_ROOT = PROJECT_ROOT / "data" / "snapshots"
 DEFAULT_COGNITION_ROOT = PROJECT_ROOT / "data" / "cognition"
+DEFAULT_EXPERIMENT_ROOT = PROJECT_ROOT / "outputs" / "experiments"
 
 
 def _agent_names(count: int) -> list[str]:
@@ -180,6 +189,134 @@ def _ollama_smoke(args: argparse.Namespace) -> int:
     return 0
 
 
+def _experiment(args: argparse.Namespace) -> int:
+    async def operation() -> dict[str, object]:
+        mode = ExperimentMode(args.mode)
+        models = list(args.models or [])
+        assignments: tuple[ModelAssignment, ...] = ()
+        if mode is ExperimentMode.CONTROLLED:
+            if len(models) != 1:
+                raise ValueError("controlled mode requires exactly one --models value")
+            assignments = tuple(
+                ModelAssignment(
+                    agent_id=f"agent-{index:03d}",
+                    provider="ollama",
+                    model=models[0],
+                    temperature_milli=args.temperature_milli,
+                )
+                for index in range(1, 4)
+            )
+        elif mode is ExperimentMode.NATURAL:
+            if len(models) != 3:
+                raise ValueError("natural mode requires exactly three --models values")
+            assignments = tuple(
+                ModelAssignment(
+                    agent_id=f"agent-{index:03d}",
+                    provider="ollama",
+                    model=model,
+                    temperature_milli=args.temperature_milli,
+                )
+                for index, model in enumerate(models, start=1)
+            )
+        elif models:
+            raise ValueError("scripted mode does not accept --models")
+
+        config = ExperimentConfig(
+            seed=args.seed,
+            width=args.size,
+            height=args.size,
+            mode=mode,
+            model_assignments=assignments,
+        )
+        initial = create_experiment_world(config)
+        engine = SimulationEngine(
+            state=initial.model_copy(deep=True),
+            policy=ExperimentalScriptedPolicy(),
+        )
+        providers = ProviderRegistry()
+        provider = None
+        try:
+            with _isolated_cognition_repository(Path(args.cognition_root)) as cognition:
+                executive = None
+                if mode is not ExperimentMode.SCRIPTED:
+                    provider = OllamaModelProvider()
+                    providers.register(provider)
+                    available = await providers.available_bindings()
+                    missing = {
+                        (assignment.provider, assignment.model)
+                        for assignment in assignments
+                        if (assignment.provider, assignment.model) not in available
+                    }
+                    if missing:
+                        raise RuntimeError(
+                            "selected model is absent from Ollama inventory: "
+                            + ", ".join(sorted(model for _, model in missing))
+                        )
+                    executive = ExecutiveLayer(
+                        providers=providers,
+                        cognition=cognition,
+                        embedding_provider=DeterministicEmbeddingProvider(),
+                    )
+                runner = ExperimentRunner(
+                    config=config,
+                    initial_state=initial,
+                    engine=engine,
+                    cognition=cognition,
+                    executive=executive,
+                )
+                processed = await runner.run_to_completion(max_events=args.max_events)
+                bundle = runner.export_bundle()
+                repository = ExperimentBundleRepository(Path(args.output_root))
+                path = repository.save(args.name, bundle)
+                replay = replay_bundle(bundle)
+                return {
+                    "bundle": str(path),
+                    "mode": mode.value,
+                    "processed_events": processed,
+                    "decisions": len(bundle.decisions),
+                    "duration_minutes": bundle.metrics.duration_minutes,
+                    "state_hash": bundle.final_state_hash,
+                    "event_digest": bundle.final_event_digest,
+                    "exact_replay_verified": (
+                        replay.state_hash == bundle.final_state_hash
+                        and replay.event_log.digest == bundle.final_event_digest
+                    ),
+                    "metrics": bundle.metrics.model_dump(mode="json"),
+                }
+        finally:
+            await providers.close()
+
+    print(
+        json.dumps(
+            asyncio.run(operation()), ensure_ascii=False, indent=2, sort_keys=True
+        )
+    )
+    return 0
+
+
+def _replay_experiment(args: argparse.Namespace) -> int:
+    repository = ExperimentBundleRepository(Path(args.output_root))
+    bundle = repository.load(args.name)
+    engine = replay_bundle(bundle)
+    print(
+        json.dumps(
+            {
+                "run_id": engine.state.run.run_id,
+                "duration_minutes": engine.state.game_minute,
+                "decisions": len(bundle.decisions),
+                "state_hash": engine.state_hash,
+                "event_digest": engine.event_log.digest,
+                "network_calls": 0,
+                "exact_replay_verified": True,
+            },
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="ai-society")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -225,6 +362,37 @@ def build_parser() -> argparse.ArgumentParser:
         "--cognition-root", default=str(DEFAULT_COGNITION_ROOT)
     )
     smoke_parser.set_defaults(handler=_ollama_smoke)
+
+    experiment_parser = subparsers.add_parser(
+        "experiment", help="run and export the seven-day Experimental MVP"
+    )
+    experiment_parser.add_argument(
+        "--mode",
+        choices=["scripted", "natural", "controlled"],
+        default="scripted",
+    )
+    experiment_parser.add_argument("--models", nargs="*")
+    experiment_parser.add_argument("--seed", type=int, default=20260715)
+    experiment_parser.add_argument("--size", type=int, choices=[48, 64], default=48)
+    experiment_parser.add_argument("--temperature-milli", type=int, default=0)
+    experiment_parser.add_argument("--max-events", type=int, default=100_000)
+    experiment_parser.add_argument("--name", default="three-agents-seven-days")
+    experiment_parser.add_argument(
+        "--output-root", default=str(DEFAULT_EXPERIMENT_ROOT)
+    )
+    experiment_parser.add_argument(
+        "--cognition-root", default=str(DEFAULT_COGNITION_ROOT)
+    )
+    experiment_parser.set_defaults(handler=_experiment)
+
+    replay_parser = subparsers.add_parser(
+        "replay-experiment", help="verify an exported experiment without network calls"
+    )
+    replay_parser.add_argument("name")
+    replay_parser.add_argument(
+        "--output-root", default=str(DEFAULT_EXPERIMENT_ROOT)
+    )
+    replay_parser.set_defaults(handler=_replay_experiment)
     return parser
 
 

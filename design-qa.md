@@ -81,3 +81,15 @@ Intentional, non-blocking differences from the concept image:
   the existing observer presentation contract.
 
 final result: passed
+
+## Block 4 regression pass — 2026-07-15
+
+- Запуск по умолчанию показывает русский сценарий «три агента, семь дней» на карте 48×48.
+- Верхняя панель отображает авторитетные погоду и температуру; пояснение под картой больше не
+  называет погоду декоративной.
+- Хроника показывает создание совместного проекта, а карточки — русские названия текущих действий.
+- Новое пиксельное хранилище загружается как отдельный Phaser asset без missing-texture marker.
+- Pause/resume, ×10 и read-only WebSocket продолжают работать; console warnings/errors отсутствуют.
+- Выбранная композиция option 2, палитра и русскоязычная иерархия не изменены.
+
+Block 4 regression result: passed

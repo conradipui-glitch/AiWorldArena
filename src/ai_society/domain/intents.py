@@ -6,7 +6,9 @@ from ai_society.domain.enums import (
     ActionKind,
     CommitmentResolution,
     OfferResponse,
+    ProjectResponse,
     ResourceKind,
+    StructureKind,
 )
 from ai_society.domain.models import Position
 
@@ -56,6 +58,25 @@ class BuildShelterIntent(IntentBase):
     location: Position
 
 
+class BuildStorageIntent(IntentBase):
+    action: Literal[ActionKind.BUILD_STORAGE] = ActionKind.BUILD_STORAGE
+    location: Position
+
+
+class StoreResourceIntent(IntentBase):
+    action: Literal[ActionKind.STORE_RESOURCE] = ActionKind.STORE_RESOURCE
+    structure_id: str = Field(pattern=r"^structure-[0-9]{6}$")
+    resource: ResourceKind
+    amount: int = Field(ge=1, le=1_000)
+
+
+class TakeResourceIntent(IntentBase):
+    action: Literal[ActionKind.TAKE_RESOURCE] = ActionKind.TAKE_RESOURCE
+    structure_id: str = Field(pattern=r"^structure-[0-9]{6}$")
+    resource: ResourceKind
+    amount: int = Field(ge=1, le=1_000)
+
+
 class SpeakIntent(IntentBase):
     action: Literal[ActionKind.SPEAK] = ActionKind.SPEAK
     target_agent_id: str = Field(pattern=r"^agent-[0-9]{3}$")
@@ -103,6 +124,31 @@ class ResolvePromiseIntent(IntentBase):
     resolution: CommitmentResolution
 
 
+class CreateProjectIntent(IntentBase):
+    action: Literal[ActionKind.CREATE_PROJECT] = ActionKind.CREATE_PROJECT
+    structure_kind: StructureKind
+    location: Position
+    invited_agent_ids: list[str] = Field(min_length=1, max_length=10)
+
+
+class RespondToProjectIntent(IntentBase):
+    action: Literal[ActionKind.RESPOND_TO_PROJECT] = ActionKind.RESPOND_TO_PROJECT
+    project_id: str = Field(pattern=r"^project-[0-9]{6}$")
+    response: ProjectResponse
+
+
+class ContributeToProjectIntent(IntentBase):
+    action: Literal[ActionKind.CONTRIBUTE_TO_PROJECT] = ActionKind.CONTRIBUTE_TO_PROJECT
+    project_id: str = Field(pattern=r"^project-[0-9]{6}$")
+    resource: ResourceKind
+    amount: int = Field(ge=1, le=1_000)
+
+
+class LeaveProjectIntent(IntentBase):
+    action: Literal[ActionKind.LEAVE_PROJECT] = ActionKind.LEAVE_PROJECT
+    project_id: str = Field(pattern=r"^project-[0-9]{6}$")
+
+
 AnyIntent: TypeAlias = Annotated[
     ObserveIntent
     | MoveIntent
@@ -112,12 +158,19 @@ AnyIntent: TypeAlias = Annotated[
     | WaitIntent
     | BuildFireIntent
     | BuildShelterIntent
+    | BuildStorageIntent
+    | StoreResourceIntent
+    | TakeResourceIntent
     | SpeakIntent
     | TransferIntent
     | CreateOfferIntent
     | RespondToOfferIntent
     | CreatePromiseIntent
-    | ResolvePromiseIntent,
+    | ResolvePromiseIntent
+    | CreateProjectIntent
+    | RespondToProjectIntent
+    | ContributeToProjectIntent
+    | LeaveProjectIntent,
     Field(discriminator="action"),
 ]
 

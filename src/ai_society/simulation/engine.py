@@ -11,6 +11,9 @@ from ai_society.domain.enums import (
     MessageStatus,
     OfferResponse,
     OfferStatus,
+    ProjectMemberStatus,
+    ProjectResponse,
+    ProjectStatus,
     ResourceKind,
     RunStatus,
     ScheduledEventKind,
@@ -23,24 +26,32 @@ from ai_society.domain.intents import (
     AnyIntent,
     BuildFireIntent,
     BuildShelterIntent,
+    BuildStorageIntent,
+    ContributeToProjectIntent,
     ConsumeIntent,
     CreateOfferIntent,
     CreatePromiseIntent,
+    CreateProjectIntent,
     GatherIntent,
     MoveIntent,
     ObserveIntent,
     ResolvePromiseIntent,
+    RespondToProjectIntent,
     RespondToOfferIntent,
     RestIntent,
+    StoreResourceIntent,
     SpeakIntent,
     TransferIntent,
+    TakeResourceIntent,
     WaitIntent,
+    LeaveProjectIntent,
 )
 from ai_society.domain.models import (
     ActionResult,
     Agent,
     AgentObservation,
     Commitment,
+    JointProject,
     Message,
     MindBinding,
     Position,
@@ -69,18 +80,28 @@ ACTION_DURATIONS: dict[ActionKind, int] = {
     ActionKind.WAIT: 5,
     ActionKind.BUILD_FIRE: 20,
     ActionKind.BUILD_SHELTER: 120,
+    ActionKind.BUILD_STORAGE: 90,
+    ActionKind.STORE_RESOURCE: 5,
+    ActionKind.TAKE_RESOURCE: 5,
     ActionKind.SPEAK: 5,
     ActionKind.TRANSFER: 5,
     ActionKind.CREATE_OFFER: 5,
     ActionKind.RESPOND_TO_OFFER: 5,
     ActionKind.CREATE_PROMISE: 5,
     ActionKind.RESOLVE_PROMISE: 2,
+    ActionKind.CREATE_PROJECT: 5,
+    ActionKind.RESPOND_TO_PROJECT: 3,
+    ActionKind.CONTRIBUTE_TO_PROJECT: 8,
+    ActionKind.LEAVE_PROJECT: 3,
 }
 
 BUILD_COSTS: dict[StructureKind, dict[ResourceKind, int]] = {
     StructureKind.FIRE: {ResourceKind.WOOD: 2},
     StructureKind.SHELTER: {ResourceKind.WOOD: 4, ResourceKind.STONE: 2},
+    StructureKind.STORAGE: {ResourceKind.WOOD: 4, ResourceKind.STONE: 2},
 }
+
+STORAGE_CAPACITY = 100
 
 VISIBILITY_RADIUS = 2
 COMMUNICATION_RADIUS = 4
@@ -121,6 +142,19 @@ class SimulationEngine:
                     kind=ScheduledEventKind.DECISION_DUE,
                     actor_id=agent_id,
                     due_minute=0,
+                )
+            for transition in self.state.environment.transitions:
+                self._schedule(
+                    kind=ScheduledEventKind.WEATHER_CHANGE_DUE,
+                    actor_id="world",
+                    subject_id=transition.transition_id,
+                    due_minute=transition.minute,
+                )
+            if self.state.run.ends_minute is not None:
+                self._schedule(
+                    kind=ScheduledEventKind.EXPERIMENT_END_DUE,
+                    actor_id="world",
+                    due_minute=self.state.run.ends_minute,
                 )
 
     @classmethod
@@ -397,6 +431,57 @@ class SimulationEngine:
                 agent_id, StructureKind.SHELTER, intent.location, intent.action, intent
             )
 
+        if isinstance(intent, BuildStorageIntent):
+            return self._build_structure(
+                agent_id, StructureKind.STORAGE, intent.location, intent.action, intent
+            )
+
+        if isinstance(intent, StoreResourceIntent):
+            storage = self._available_storage(agent, intent.structure_id)
+            if storage is None:
+                return self._reject_intent(agent_id, intent, "storage is unavailable")
+            carried = agent.inventory.get(intent.resource, 0)
+            if carried < intent.amount:
+                return self._reject_intent(agent_id, intent, "insufficient inventory")
+            if sum(storage.inventory.values()) + intent.amount > storage.capacity:
+                return self._reject_intent(agent_id, intent, "storage capacity is exceeded")
+            agent.inventory[intent.resource] = carried - intent.amount
+            storage.inventory[intent.resource] = (
+                storage.inventory.get(intent.resource, 0) + intent.amount
+            )
+            return self._record_success(
+                agent_id,
+                WorldEventKind.RESOURCE_STORED,
+                intent.action,
+                {
+                    "structure_id": storage.structure_id,
+                    "resource": intent.resource.value,
+                    "amount": intent.amount,
+                },
+            )
+
+        if isinstance(intent, TakeResourceIntent):
+            storage = self._available_storage(agent, intent.structure_id)
+            if storage is None:
+                return self._reject_intent(agent_id, intent, "storage is unavailable")
+            stored = storage.inventory.get(intent.resource, 0)
+            if stored < intent.amount:
+                return self._reject_intent(agent_id, intent, "stored resource is unavailable")
+            storage.inventory[intent.resource] = stored - intent.amount
+            agent.inventory[intent.resource] = (
+                agent.inventory.get(intent.resource, 0) + intent.amount
+            )
+            return self._record_success(
+                agent_id,
+                WorldEventKind.RESOURCE_TAKEN,
+                intent.action,
+                {
+                    "structure_id": storage.structure_id,
+                    "resource": intent.resource.value,
+                    "amount": intent.amount,
+                },
+            )
+
         if isinstance(intent, SpeakIntent):
             target = self._available_agent(
                 actor=agent, target_id=intent.target_agent_id, radius=COMMUNICATION_RADIUS
@@ -652,6 +737,134 @@ class SimulationEngine:
                 },
             )
 
+        if isinstance(intent, CreateProjectIntent):
+            if intent.structure_kind is not StructureKind.STORAGE:
+                return self._reject_intent(
+                    agent_id, intent, "only shared storage is available in the MVP"
+                )
+            if intent.location != agent.position:
+                return self._reject_intent(agent_id, intent, "project must start here")
+            invited = sorted(set(intent.invited_agent_ids))
+            if agent_id in invited or any(item not in self.state.agents for item in invited):
+                return self._reject_intent(agent_id, intent, "project invitations are invalid")
+            if any(
+                self.state.agents[item].position.manhattan_distance(agent.position)
+                > COMMUNICATION_RADIUS
+                for item in invited
+            ):
+                return self._reject_intent(agent_id, intent, "invited agent is unavailable")
+            project_id = f"project-{self.state.next_project_sequence:06d}"
+            self.state.next_project_sequence += 1
+            member_status = {agent_id: ProjectMemberStatus.JOINED}
+            member_status.update(
+                {item: ProjectMemberStatus.INVITED for item in invited}
+            )
+            self.state.projects[project_id] = JointProject(
+                project_id=project_id,
+                creator_id=agent_id,
+                structure_kind=intent.structure_kind,
+                location=intent.location,
+                member_status=member_status,
+                required_resources=dict(BUILD_COSTS[intent.structure_kind]),
+                contributions={agent_id: {}},
+                created_minute=self.state.game_minute,
+            )
+            return self._record_success(
+                agent_id,
+                WorldEventKind.PROJECT_CREATED,
+                intent.action,
+                {
+                    "project_id": project_id,
+                    "structure": intent.structure_kind.value,
+                    "invited": ",".join(invited),
+                    "position": f"{intent.location.x},{intent.location.y}",
+                },
+            )
+
+        if isinstance(intent, RespondToProjectIntent):
+            project = self.state.projects.get(intent.project_id)
+            if (
+                project is None
+                or project.status is not ProjectStatus.OPEN
+                or project.member_status.get(agent_id) is not ProjectMemberStatus.INVITED
+            ):
+                return self._reject_intent(agent_id, intent, "project invitation is unavailable")
+            status = (
+                ProjectMemberStatus.JOINED
+                if intent.response is ProjectResponse.JOIN
+                else ProjectMemberStatus.REFUSED
+            )
+            project.member_status[agent_id] = status
+            project.version += 1
+            if status is ProjectMemberStatus.JOINED:
+                project.contributions.setdefault(agent_id, {})
+            return self._record_success(
+                agent_id,
+                (
+                    WorldEventKind.PROJECT_JOINED
+                    if status is ProjectMemberStatus.JOINED
+                    else WorldEventKind.PROJECT_REFUSED
+                ),
+                intent.action,
+                {"project_id": project.project_id, "creator_id": project.creator_id},
+            )
+
+        if isinstance(intent, ContributeToProjectIntent):
+            project = self.state.projects.get(intent.project_id)
+            if (
+                project is None
+                or project.status is not ProjectStatus.OPEN
+                or project.member_status.get(agent_id) is not ProjectMemberStatus.JOINED
+                or agent.position.manhattan_distance(project.location) > 1
+            ):
+                return self._reject_intent(agent_id, intent, "project is unavailable")
+            required = project.required_resources.get(intent.resource, 0)
+            contributed = sum(
+                resources.get(intent.resource, 0)
+                for resources in project.contributions.values()
+            )
+            remaining = max(0, required - contributed)
+            if remaining == 0:
+                return self._reject_intent(agent_id, intent, "resource is not required")
+            amount = min(intent.amount, remaining)
+            if agent.inventory.get(intent.resource, 0) < amount:
+                return self._reject_intent(agent_id, intent, "insufficient inventory")
+            agent.inventory[intent.resource] = agent.inventory.get(intent.resource, 0) - amount
+            contribution = project.contributions.setdefault(agent_id, {})
+            contribution[intent.resource] = contribution.get(intent.resource, 0) + amount
+            project.version += 1
+            result = self._record_success(
+                agent_id,
+                WorldEventKind.PROJECT_CONTRIBUTION_ADDED,
+                intent.action,
+                {
+                    "project_id": project.project_id,
+                    "resource": intent.resource.value,
+                    "amount": amount,
+                },
+            )
+            if self._project_is_funded(project):
+                self._complete_project(project)
+            return result
+
+        if isinstance(intent, LeaveProjectIntent):
+            project = self.state.projects.get(intent.project_id)
+            if (
+                project is None
+                or project.status is not ProjectStatus.OPEN
+                or project.creator_id == agent_id
+                or project.member_status.get(agent_id) is not ProjectMemberStatus.JOINED
+            ):
+                return self._reject_intent(agent_id, intent, "project cannot be left")
+            project.member_status[agent_id] = ProjectMemberStatus.LEFT
+            project.version += 1
+            return self._record_success(
+                agent_id,
+                WorldEventKind.PROJECT_LEFT,
+                intent.action,
+                {"project_id": project.project_id, "creator_id": project.creator_id},
+            )
+
         raise TypeError(f"unsupported intent type: {type(intent).__name__}")
 
     def hot_swap_model(
@@ -742,6 +955,8 @@ class SimulationEngine:
             "structures": len(self.state.structures),
             "messages": len(self.state.messages),
             "commitments": len(self.state.commitments),
+            "projects": len(self.state.projects),
+            "weather": self.state.environment.weather.value,
             "remaining_resources": sum(
                 node.quantity for node in self.state.resources.values()
             ),
@@ -807,6 +1022,56 @@ class SimulationEngine:
                 message.sender_id,
                 {"message_id": message.message_id, "recipient_id": message.recipient_id},
                 "message delivered",
+            )
+
+        if scheduled.kind is ScheduledEventKind.WEATHER_CHANGE_DUE:
+            transition = next(
+                (
+                    item
+                    for item in self.state.environment.transitions
+                    if item.transition_id == subject_id
+                ),
+                None,
+            )
+            if transition is None:
+                return self._record_skipped(scheduled, "weather transition is unavailable")
+            for agent in self.state.agents.values():
+                self._advance_needs_to(agent, self.state.game_minute)
+            was_crisis = self.state.environment.crisis
+            self.state.environment.weather = transition.weather
+            self.state.environment.ambient_temperature_milli_c = (
+                transition.ambient_temperature_milli_c
+            )
+            self.state.environment.crisis = transition.crisis
+            self.state.environment.last_changed_minute = self.state.game_minute
+            if transition.crisis and not was_crisis:
+                kind = WorldEventKind.WEATHER_CRISIS_STARTED
+            elif was_crisis and not transition.crisis:
+                kind = WorldEventKind.WEATHER_CRISIS_ENDED
+            else:
+                kind = WorldEventKind.WEATHER_CHANGED
+            return self._record_scheduled_result(
+                kind,
+                "world",
+                {
+                    "transition_id": transition.transition_id,
+                    "weather": transition.weather.value,
+                    "ambient_temperature_milli_c": transition.ambient_temperature_milli_c,
+                    "crisis": transition.crisis,
+                },
+                "weather changed",
+            )
+
+        if scheduled.kind is ScheduledEventKind.EXPERIMENT_END_DUE:
+            for agent in self.state.agents.values():
+                self._advance_needs_to(agent, self.state.game_minute)
+            self.state.event_queue.clear()
+            self.state.run.status = RunStatus.COMPLETED
+            return self._record_scheduled_result(
+                WorldEventKind.EXPERIMENT_COMPLETED,
+                "world",
+                {"duration_minutes": self.state.game_minute},
+                "experiment completed",
             )
 
         if scheduled.kind in {
@@ -890,6 +1155,12 @@ class SimulationEngine:
             and agent.position.manhattan_distance(resource.position) <= radius
         ]
         visible_resources.sort(key=lambda resource: resource.entity_id)
+        visible_structures = [
+            structure
+            for structure in self.state.structures.values()
+            if agent.position.manhattan_distance(structure.position) <= radius
+        ]
+        visible_structures.sort(key=lambda structure: structure.structure_id)
         visible_agents = [
             VisibleAgent(
                 agent_id=other.identity.agent_id,
@@ -925,6 +1196,12 @@ class SimulationEngine:
             in {commitment.creator_id, commitment.beneficiary_id}
         ]
         commitments.sort(key=lambda item: item.commitment_id)
+        projects = [
+            project
+            for project in self.state.projects.values()
+            if agent.identity.agent_id in project.member_status
+        ]
+        projects.sort(key=lambda item: item.project_id)
         return AgentObservation(
             run_id=self.state.run.run_id,
             agent_id=agent.identity.agent_id,
@@ -934,9 +1211,13 @@ class SimulationEngine:
             game_minute=game_minute,
             position=agent.position,
             body=agent.body.model_copy(deep=True),
+            environment=self.state.environment.model_copy(deep=True),
             inventory=dict(agent.inventory),
             visible_tiles=[tile.model_copy(deep=True) for tile in visible_tiles],
             visible_resources=[node.model_copy(deep=True) for node in visible_resources],
+            visible_structures=[
+                structure.model_copy(deep=True) for structure in visible_structures
+            ],
             visible_agents=[item.model_copy(deep=True) for item in visible_agents],
             known_positions=list(agent.knowledge.explored),
             delivered_messages=[item.model_copy(deep=True) for item in messages[-100:]],
@@ -944,6 +1225,7 @@ class SimulationEngine:
             accessible_commitments=[
                 item.model_copy(deep=True) for item in commitments[-100:]
             ],
+            accessible_projects=[item.model_copy(deep=True) for item in projects[-100:]],
         )
 
     def _build_structure(
@@ -975,6 +1257,8 @@ class SimulationEngine:
             position=location,
             builder_id=agent_id,
             created_minute=self.state.game_minute,
+            contributor_ids=[agent_id],
+            capacity=STORAGE_CAPACITY if kind is StructureKind.STORAGE else 0,
         )
         return self._record_success(
             agent_id,
@@ -1052,6 +1336,62 @@ class SimulationEngine:
             return None
         return target
 
+    def _available_storage(self, agent: Agent, structure_id: str) -> Structure | None:
+        structure = self.state.structures.get(structure_id)
+        if (
+            structure is None
+            or structure.kind is not StructureKind.STORAGE
+            or agent.position.manhattan_distance(structure.position) > 1
+        ):
+            return None
+        return structure
+
+    @staticmethod
+    def _project_is_funded(project: JointProject) -> bool:
+        return all(
+            sum(resources.get(resource, 0) for resources in project.contributions.values())
+            >= required
+            for resource, required in project.required_resources.items()
+        )
+
+    def _complete_project(self, project: JointProject) -> None:
+        completed_project = JointProject.model_validate(
+            {
+                **project.model_dump(mode="python"),
+                "status": ProjectStatus.COMPLETED,
+                "completed_minute": self.state.game_minute,
+                "version": project.version + 1,
+            }
+        )
+        self.state.projects[project.project_id] = completed_project
+        project = completed_project
+        structure_id = f"structure-{self.state.next_structure_sequence:06d}"
+        self.state.next_structure_sequence += 1
+        contributors = sorted(
+            agent_id
+            for agent_id, resources in project.contributions.items()
+            if sum(resources.values()) > 0
+        )
+        self.state.structures[structure_id] = Structure(
+            structure_id=structure_id,
+            kind=project.structure_kind,
+            position=project.location,
+            builder_id=project.creator_id,
+            created_minute=self.state.game_minute,
+            contributor_ids=contributors,
+            capacity=STORAGE_CAPACITY,
+        )
+        self.event_log.append(
+            kind=WorldEventKind.PROJECT_COMPLETED,
+            game_minute=self.state.game_minute,
+            actor_id=project.creator_id,
+            payload={
+                "project_id": project.project_id,
+                "structure_id": structure_id,
+                "contributors": ",".join(contributors),
+            },
+        )
+
     def _schedule(
         self,
         *,
@@ -1088,6 +1428,31 @@ class SimulationEngine:
             health_total = agent.body.health_remainder_minutes + elapsed
             health_change, agent.body.health_remainder_minutes = divmod(health_total, 60)
             agent.body.health = max(0, agent.body.health - health_change)
+        protected = any(
+            structure.position == agent.position
+            and structure.kind in {StructureKind.FIRE, StructureKind.SHELTER}
+            for structure in self.state.structures.values()
+        )
+        cold_rate = 0
+        if not protected:
+            if self.state.environment.crisis:
+                cold_rate = 250
+            elif self.state.environment.weather.value == "rain":
+                cold_rate = 80
+        if cold_rate:
+            cold_steps = elapsed // 30
+            agent.body.body_temperature_milli_c = max(
+                30_000,
+                agent.body.body_temperature_milli_c - cold_rate * cold_steps,
+            )
+        elif agent.body.body_temperature_milli_c < 37_000:
+            recovery_steps = elapsed // 30
+            agent.body.body_temperature_milli_c = min(
+                37_000,
+                agent.body.body_temperature_milli_c + 120 * recovery_steps,
+            )
+        if agent.body.body_temperature_milli_c <= 35_000:
+            agent.body.health = max(0, agent.body.health - elapsed // 60)
         agent.body.last_updated_minute = game_minute
 
     def _record_decision_diagnostics(
