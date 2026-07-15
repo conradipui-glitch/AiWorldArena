@@ -11,6 +11,8 @@ from ai_society.api.observer import ObserverRunConfig, RunRegistry
 from ai_society.providers.contracts import ProviderError
 from ai_society.providers.ollama import OllamaModelProvider
 from ai_society.providers.registry import ProviderRegistry
+from ai_society.research.persistence import ResearchArtifactError
+from ai_society.research.service import ResearchService
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -72,11 +74,13 @@ def create_app(
     *,
     snapshot_root: Path | None = None,
     cognition_root: Path | None = None,
+    experiment_root: Path | None = None,
     provider_registry: ProviderRegistry | None = None,
     observer_tick_seconds: float = 0.35,
 ) -> FastAPI:
     snapshot_root = snapshot_root or PROJECT_ROOT / "data" / "snapshots"
     cognition_root = cognition_root or PROJECT_ROOT / "data" / "cognition"
+    experiment_root = experiment_root or PROJECT_ROOT / "outputs" / "experiments"
     registry = RunRegistry(
         snapshot_root=snapshot_root,
         cognition_root=cognition_root,
@@ -92,17 +96,67 @@ def create_app(
 
     app = FastAPI(
         title="AI Society Simulation API",
-        version="0.4.0",
+        version="0.5.0",
         docs_url="/docs",
         redoc_url=None,
         lifespan=lifespan,
     )
     app.state.registry = registry
     app.state.provider_registry = provider_registry
+    app.state.research = ResearchService(experiment_root)
 
     @app.get("/health")
     async def health() -> dict[str, str]:
-        return {"status": "ok", "engine": "block4"}
+        return {"status": "ok", "engine": "block5"}
+
+    @app.get("/v1/experiments")
+    async def list_experiments() -> dict[str, object]:
+        research = app.state.research
+        try:
+            return {
+                "runs": [
+                    entry.model_dump(mode="json") for entry in research.list_catalog()
+                ]
+            }
+        except ResearchArtifactError as exc:
+            raise HTTPException(
+                status_code=409, detail="Каталог исследований повреждён или недоступен."
+            ) from exc
+
+    @app.get("/v1/experiments/compare")
+    async def compare_experiments(left: str, right: str) -> dict[str, object]:
+        try:
+            return app.state.research.compare(
+                left, right, persist=False
+            ).model_dump(mode="json")
+        except ResearchArtifactError as exc:
+            status_code = 422 if "safe slug" in str(exc) else 404
+            raise HTTPException(
+                status_code=status_code,
+                detail="Невозможно сравнить указанные исследовательские запуски.",
+            ) from exc
+
+    @app.get("/v1/experiments/{artifact_name}")
+    async def read_experiment_manifest(artifact_name: str) -> dict[str, object]:
+        try:
+            return app.state.research.load_manifest(artifact_name).model_dump(mode="json")
+        except ResearchArtifactError as exc:
+            status_code = 422 if "safe slug" in str(exc) else 404
+            raise HTTPException(
+                status_code=status_code,
+                detail="Исследовательский запуск не найден или не прошёл проверку.",
+            ) from exc
+
+    @app.get("/v1/experiments/{artifact_name}/report")
+    async def read_experiment_report(artifact_name: str) -> dict[str, object]:
+        try:
+            return app.state.research.load_report(artifact_name).model_dump(mode="json")
+        except ResearchArtifactError as exc:
+            status_code = 422 if "safe slug" in str(exc) else 404
+            raise HTTPException(
+                status_code=status_code,
+                detail="Исследовательский отчёт не найден или не прошёл проверку.",
+            ) from exc
 
     @app.get("/v1/providers/{provider_id}/models")
     async def list_provider_models(provider_id: str) -> dict[str, object]:

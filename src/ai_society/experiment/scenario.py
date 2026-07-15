@@ -62,13 +62,14 @@ def create_experiment_world(config: ExperimentConfig) -> WorldState:
     world.run.mode = config.mode
     world.run.status = RunStatus.CREATED
     world.run.ends_minute = config.duration_minutes
-    world.run.engine_version = "0.4.0"
+    world.run.engine_version = "0.5.0"
     world.run.rules_version = "block4-v1"
     run_material = {
         "world_id": world.run.world_id,
         "mode": config.mode.value,
         "models": [item.model_dump(mode="json") for item in config.model_assignments],
         "duration_minutes": config.duration_minutes,
+        "run_nonce": config.run_nonce,
     }
     world.run.run_id = f"run-{canonical_digest(run_material)[:12]}"
 

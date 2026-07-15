@@ -25,6 +25,8 @@ from ai_society.providers.ollama import (
     OllamaModelProvider,
 )
 from ai_society.providers.registry import ProviderRegistry
+from ai_society.research.models import ResearchArtifactKind
+from ai_society.research.service import ResearchService
 from ai_society.simulation.engine import SimulationEngine
 from ai_society.simulation.generation import generate_world
 from ai_society.simulation.policies import ScriptedPolicy
@@ -189,106 +191,286 @@ def _ollama_smoke(args: argparse.Namespace) -> int:
     return 0
 
 
+def _assignments_for(
+    mode: ExperimentMode, models: list[str], temperature_milli: int
+) -> tuple[ModelAssignment, ...]:
+    if mode is ExperimentMode.CONTROLLED:
+        if len(models) != 1:
+            raise ValueError("controlled mode requires exactly one --models value")
+        return tuple(
+            ModelAssignment(
+                agent_id=f"agent-{index:03d}",
+                provider="ollama",
+                model=models[0],
+                temperature_milli=temperature_milli,
+            )
+            for index in range(1, 4)
+        )
+    if mode is ExperimentMode.NATURAL:
+        if len(models) != 3:
+            raise ValueError("natural mode requires exactly three --models values")
+        return tuple(
+            ModelAssignment(
+                agent_id=f"agent-{index:03d}",
+                provider="ollama",
+                model=model,
+                temperature_milli=temperature_milli,
+            )
+            for index, model in enumerate(models, start=1)
+        )
+    if models:
+        raise ValueError("scripted mode does not accept --models")
+    return ()
+
+
+async def _execute_experiment(
+    *,
+    config: ExperimentConfig,
+    cognition_root: Path,
+    max_events: int,
+    initial_state=None,
+    annotations: list[str] | None = None,
+) -> tuple[object, int]:
+    """Run a fresh experiment. This path is intentionally distinct from replay."""
+
+    initial = (
+        create_experiment_world(config)
+        if initial_state is None
+        else initial_state.model_copy(deep=True)
+    )
+    engine = SimulationEngine(
+        state=initial.model_copy(deep=True), policy=ExperimentalScriptedPolicy()
+    )
+    providers = ProviderRegistry()
+    try:
+        with _isolated_cognition_repository(cognition_root) as cognition:
+            executive = None
+            if config.mode is not ExperimentMode.SCRIPTED:
+                provider = OllamaModelProvider()
+                providers.register(provider)
+                available = await providers.available_bindings()
+                missing = {
+                    (assignment.provider, assignment.model)
+                    for assignment in config.model_assignments
+                    if (assignment.provider, assignment.model) not in available
+                }
+                if missing:
+                    raise RuntimeError(
+                        "selected model is absent from Ollama inventory: "
+                        + ", ".join(sorted(model for _, model in missing))
+                    )
+                executive = ExecutiveLayer(
+                    providers=providers,
+                    cognition=cognition,
+                    embedding_provider=DeterministicEmbeddingProvider(),
+                )
+            runner = ExperimentRunner(
+                config=config,
+                initial_state=initial,
+                engine=engine,
+                cognition=cognition,
+                executive=executive,
+            )
+            for annotation in annotations or []:
+                runner.record_annotation(actor="operator", reason=annotation)
+            processed = await runner.run_to_completion(max_events=max_events)
+            return runner.export_bundle(), processed
+    finally:
+        await providers.close()
+
+
+def _experiment_summary(
+    *,
+    bundle,
+    processed: int,
+    manifest,
+    output_root: Path,
+) -> dict[str, object]:
+    return {
+        "bundle": str(output_root / f"{manifest.artifact_name}.json"),
+        "manifest": str(
+            output_root / "research" / "manifests" / f"{manifest.artifact_name}.json"
+        ),
+        "report": str(
+            output_root / "research" / "reports" / f"{manifest.artifact_name}.md"
+        ),
+        "mode": bundle.config.mode.value,
+        "marks": [mark.value for mark in manifest.marks],
+        "processed_events": processed,
+        "decisions": len(bundle.decisions),
+        "duration_minutes": bundle.metrics.duration_minutes,
+        "state_hash": bundle.final_state_hash,
+        "event_digest": bundle.final_event_digest,
+        "exact_replay_verified": manifest.exact_decision_replay_verified,
+        "metrics": bundle.metrics.model_dump(mode="json"),
+    }
+
+
 def _experiment(args: argparse.Namespace) -> int:
     async def operation() -> dict[str, object]:
         mode = ExperimentMode(args.mode)
-        models = list(args.models or [])
-        assignments: tuple[ModelAssignment, ...] = ()
-        if mode is ExperimentMode.CONTROLLED:
-            if len(models) != 1:
-                raise ValueError("controlled mode requires exactly one --models value")
-            assignments = tuple(
-                ModelAssignment(
-                    agent_id=f"agent-{index:03d}",
-                    provider="ollama",
-                    model=models[0],
-                    temperature_milli=args.temperature_milli,
-                )
-                for index in range(1, 4)
-            )
-        elif mode is ExperimentMode.NATURAL:
-            if len(models) != 3:
-                raise ValueError("natural mode requires exactly three --models values")
-            assignments = tuple(
-                ModelAssignment(
-                    agent_id=f"agent-{index:03d}",
-                    provider="ollama",
-                    model=model,
-                    temperature_milli=args.temperature_milli,
-                )
-                for index, model in enumerate(models, start=1)
-            )
-        elif models:
-            raise ValueError("scripted mode does not accept --models")
-
         config = ExperimentConfig(
             seed=args.seed,
             width=args.size,
             height=args.size,
             mode=mode,
-            model_assignments=assignments,
+            model_assignments=_assignments_for(
+                mode, list(args.models or []), args.temperature_milli
+            ),
+            run_nonce=args.name,
         )
-        initial = create_experiment_world(config)
-        engine = SimulationEngine(
-            state=initial.model_copy(deep=True),
-            policy=ExperimentalScriptedPolicy(),
+        root = Path(args.output_root)
+        bundle, processed = await _execute_experiment(
+            config=config,
+            cognition_root=Path(args.cognition_root),
+            max_events=args.max_events,
+            annotations=list(args.annotation or []),
         )
-        providers = ProviderRegistry()
-        provider = None
-        try:
-            with _isolated_cognition_repository(Path(args.cognition_root)) as cognition:
-                executive = None
-                if mode is not ExperimentMode.SCRIPTED:
-                    provider = OllamaModelProvider()
-                    providers.register(provider)
-                    available = await providers.available_bindings()
-                    missing = {
-                        (assignment.provider, assignment.model)
-                        for assignment in assignments
-                        if (assignment.provider, assignment.model) not in available
-                    }
-                    if missing:
-                        raise RuntimeError(
-                            "selected model is absent from Ollama inventory: "
-                            + ", ".join(sorted(model for _, model in missing))
-                        )
-                    executive = ExecutiveLayer(
-                        providers=providers,
-                        cognition=cognition,
-                        embedding_provider=DeterministicEmbeddingProvider(),
-                    )
-                runner = ExperimentRunner(
-                    config=config,
-                    initial_state=initial,
-                    engine=engine,
-                    cognition=cognition,
-                    executive=executive,
-                )
-                processed = await runner.run_to_completion(max_events=args.max_events)
-                bundle = runner.export_bundle()
-                repository = ExperimentBundleRepository(Path(args.output_root))
-                path = repository.save(args.name, bundle)
-                replay = replay_bundle(bundle)
-                return {
-                    "bundle": str(path),
-                    "mode": mode.value,
-                    "processed_events": processed,
-                    "decisions": len(bundle.decisions),
-                    "duration_minutes": bundle.metrics.duration_minutes,
-                    "state_hash": bundle.final_state_hash,
-                    "event_digest": bundle.final_event_digest,
-                    "exact_replay_verified": (
-                        replay.state_hash == bundle.final_state_hash
-                        and replay.event_log.digest == bundle.final_event_digest
-                    ),
-                    "metrics": bundle.metrics.model_dump(mode="json"),
-                }
-        finally:
-            await providers.close()
+        service = ResearchService(root)
+        manifest, _report = service.register_bundle(
+            artifact_name=args.name,
+            bundle=bundle,
+        )
+        return _experiment_summary(
+            bundle=bundle,
+            processed=processed,
+            manifest=manifest,
+            output_root=root,
+        )
 
+    print(json.dumps(asyncio.run(operation()), ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
+def _rerun_experiment(args: argparse.Namespace) -> int:
+    async def operation() -> dict[str, object]:
+        root = Path(args.output_root)
+        service = ResearchService(root)
+        config = service.rerun_config(args.source, args.name)
+        bundle, processed = await _execute_experiment(
+            config=config,
+            cognition_root=Path(args.cognition_root),
+            max_events=args.max_events,
+        )
+        manifest, _report = service.register_bundle(
+            artifact_name=args.name,
+            bundle=bundle,
+            artifact_kind=ResearchArtifactKind.EXPERIMENTAL_RERUN,
+            parent_artifact_name=args.source,
+        )
+        return _experiment_summary(
+            bundle=bundle,
+            processed=processed,
+            manifest=manifest,
+            output_root=root,
+        )
+
+    print(json.dumps(asyncio.run(operation()), ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
+def _replicate_experiment(args: argparse.Namespace) -> int:
+    async def operation() -> dict[str, object]:
+        if args.count < 2:
+            raise ValueError("minimal replication requires at least two replicas")
+        root = Path(args.output_root)
+        service = ResearchService(root)
+        results: list[dict[str, object]] = []
+        for index in range(1, args.count + 1):
+            name = f"{args.prefix}-{index:02d}"
+            config = service.rerun_config(args.source, name)
+            bundle, processed = await _execute_experiment(
+                config=config,
+                cognition_root=Path(args.cognition_root),
+                max_events=args.max_events,
+            )
+            manifest, _report = service.register_bundle(
+                artifact_name=name,
+                bundle=bundle,
+                artifact_kind=ResearchArtifactKind.REPLICA,
+                parent_artifact_name=args.source,
+            )
+            results.append(
+                _experiment_summary(
+                    bundle=bundle,
+                    processed=processed,
+                    manifest=manifest,
+                    output_root=root,
+                )
+            )
+        return {"source": args.source, "replicas": results}
+
+    print(json.dumps(asyncio.run(operation()), ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
+def _branch_experiment(args: argparse.Namespace) -> int:
+    async def operation() -> dict[str, object]:
+        root = Path(args.output_root)
+        service = ResearchService(root)
+        config, initial_state = service.create_initial_snapshot_branch(
+            args.source, args.name
+        )
+        bundle, processed = await _execute_experiment(
+            config=config,
+            cognition_root=Path(args.cognition_root),
+            max_events=args.max_events,
+            initial_state=initial_state,
+            annotations=[
+                f"Ветка создана из начального снимка запуска {args.source}."
+            ],
+        )
+        manifest, _report = service.register_bundle(
+            artifact_name=args.name,
+            bundle=bundle,
+            artifact_kind=ResearchArtifactKind.INITIAL_SNAPSHOT_BRANCH,
+            parent_artifact_name=args.source,
+        )
+        return _experiment_summary(
+            bundle=bundle,
+            processed=processed,
+            manifest=manifest,
+            output_root=root,
+        )
+
+    print(json.dumps(asyncio.run(operation()), ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
+def _catalog_experiments(args: argparse.Namespace) -> int:
+    service = ResearchService(Path(args.output_root))
     print(
         json.dumps(
-            asyncio.run(operation()), ensure_ascii=False, indent=2, sort_keys=True
+            {"runs": [entry.model_dump(mode="json") for entry in service.list_catalog()]},
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _compare_experiments(args: argparse.Namespace) -> int:
+    comparison = ResearchService(Path(args.output_root)).compare(args.left, args.right)
+    print(
+        json.dumps(
+            comparison.model_dump(mode="json"),
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _report_experiment(args: argparse.Namespace) -> int:
+    report = ResearchService(Path(args.output_root)).regenerate_report(args.name)
+    print(
+        json.dumps(
+            report.model_dump(mode="json"),
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
         )
     )
     return 0
@@ -378,6 +560,12 @@ def build_parser() -> argparse.ArgumentParser:
     experiment_parser.add_argument("--max-events", type=int, default=100_000)
     experiment_parser.add_argument("--name", default="three-agents-seven-days")
     experiment_parser.add_argument(
+        "--annotation",
+        action="append",
+        default=[],
+        help="explicit researcher annotation recorded in the intervention journal",
+    )
+    experiment_parser.add_argument(
         "--output-root", default=str(DEFAULT_EXPERIMENT_ROOT)
     )
     experiment_parser.add_argument(
@@ -393,6 +581,65 @@ def build_parser() -> argparse.ArgumentParser:
         "--output-root", default=str(DEFAULT_EXPERIMENT_ROOT)
     )
     replay_parser.set_defaults(handler=_replay_experiment)
+
+    rerun_parser = subparsers.add_parser(
+        "rerun-experiment",
+        help="run the same world and bindings again; this is never an exact replay",
+    )
+    rerun_parser.add_argument("source")
+    rerun_parser.add_argument("--name", required=True)
+    rerun_parser.add_argument("--max-events", type=int, default=100_000)
+    rerun_parser.add_argument("--output-root", default=str(DEFAULT_EXPERIMENT_ROOT))
+    rerun_parser.add_argument("--cognition-root", default=str(DEFAULT_COGNITION_ROOT))
+    rerun_parser.set_defaults(handler=_rerun_experiment)
+
+    replication_parser = subparsers.add_parser(
+        "replicate-experiment",
+        help="perform the mandatory minimum of two fresh replicas from one source",
+    )
+    replication_parser.add_argument("source")
+    replication_parser.add_argument("--prefix", required=True)
+    replication_parser.add_argument("--count", type=int, default=2)
+    replication_parser.add_argument("--max-events", type=int, default=100_000)
+    replication_parser.add_argument(
+        "--output-root", default=str(DEFAULT_EXPERIMENT_ROOT)
+    )
+    replication_parser.add_argument(
+        "--cognition-root", default=str(DEFAULT_COGNITION_ROOT)
+    )
+    replication_parser.set_defaults(handler=_replicate_experiment)
+
+    branch_parser = subparsers.add_parser(
+        "branch-experiment",
+        help="create a full child run from a verified time-zero bundle snapshot",
+    )
+    branch_parser.add_argument("source")
+    branch_parser.add_argument("--name", required=True)
+    branch_parser.add_argument("--max-events", type=int, default=100_000)
+    branch_parser.add_argument("--output-root", default=str(DEFAULT_EXPERIMENT_ROOT))
+    branch_parser.add_argument("--cognition-root", default=str(DEFAULT_COGNITION_ROOT))
+    branch_parser.set_defaults(handler=_branch_experiment)
+
+    catalog_parser = subparsers.add_parser(
+        "catalog-experiments", help="list verified research artifacts"
+    )
+    catalog_parser.add_argument("--output-root", default=str(DEFAULT_EXPERIMENT_ROOT))
+    catalog_parser.set_defaults(handler=_catalog_experiments)
+
+    compare_parser = subparsers.add_parser(
+        "compare-experiments", help="compare two catalogued experiment artifacts"
+    )
+    compare_parser.add_argument("left")
+    compare_parser.add_argument("right")
+    compare_parser.add_argument("--output-root", default=str(DEFAULT_EXPERIMENT_ROOT))
+    compare_parser.set_defaults(handler=_compare_experiments)
+
+    report_parser = subparsers.add_parser(
+        "report-experiment", help="regenerate a readable JSON, Markdown and SVG report"
+    )
+    report_parser.add_argument("name")
+    report_parser.add_argument("--output-root", default=str(DEFAULT_EXPERIMENT_ROOT))
+    report_parser.set_defaults(handler=_report_experiment)
     return parser
 
 

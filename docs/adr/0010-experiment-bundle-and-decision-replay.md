@@ -23,5 +23,8 @@ Exact replay создаёт новый авторитетный engine из `ini
 - Cognition входит в atomic export и защищён digest, но при exact replay не вычисляется заново:
   записанные решения уже являются результатом исходного cognition/retrieval.
 - Bundle hashes обнаруживают повреждение и несогласованность, но не удостоверяют внешнее
-  происхождение. Подписанный provenance manifest относится к Block 5.
-- Branching, сравнение запусков и поиск первой точки расхождения остаются Block 5.
+  происхождение. Block 5 добавляет machine-checkable reproducibility manifest; цифровая подпись
+  сознательно отложена, пока оператор не выберет ключевой и ownership-контракт.
+- Block 5 реализует branching только от time-zero `bundle.initial_state`, сравнение запусков и
+  поиск первой semantic точки расхождения. Mid-run branching остаётся последующим горизонтом,
+  потому что bundle v1 не содержит атомарного cognition snapshot на decision boundary.

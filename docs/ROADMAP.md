@@ -19,10 +19,13 @@ four-layer SQLite memory, compaction/forgetting, subjective beliefs, async messa
 
 Три агента, остров, семь дней; offer/response, transfer, promises, совместный проект, кризис, метрики, export и exact Decision Replay без сети.
 
-## Блок 5 — Research Layer + Release Candidate
+## Блок 5 — Research Layer + Local Checkpoint — COMPLETE
 
-Каталог запусков, mandatory minimal replication, rerun, branching, comparison, divergence, отчёты,
-reproducibility manifest, interventions, формальный полный security scan и release audit.
+Каталог запусков, проверяемый reproducibility manifest, rerun, mandatory minimal replication,
+ветка только из time-zero snapshot, comparison/first semantic divergence, JSON/Markdown/SVG
+отчёты, journal вмешательств, read-only research API и проверенный локальный Windows launcher.
+Формальный security scan и public-release audit по явному решению оператора отложены до подготовки
+публичного выпуска; этот checkpoint не заявляет security certification.
 
 ## Horizon A — Social and Information Expansion
 

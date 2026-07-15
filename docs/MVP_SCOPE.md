@@ -8,7 +8,7 @@
 
 - Детерминированный клеточный остров 48×48 или 64×64.
 - Три личности с одинаковыми стартовыми условиями.
-- Scripted, Natural и Controlled modes; минимальная replication к release candidate.
+- Scripted, Natural и Controlled modes; минимальная replication из двух новых запусков для локального research checkpoint.
 - Ресурсы, инвентарь, здоровье, голод, энергия и холод.
 - Move, observe, gather, consume, rest, wait.
 - Костёр, укрытие и простое хранилище.
@@ -16,7 +16,7 @@
 - Частичная личная карта, beliefs с confidence, четыре слоя памяти и compaction.
 - Структурированные намерения, validation, один repair и безопасный no-op.
 - Асинхронные сообщения, transfer, offer/response, минимальный commitment и совместный проект.
-- Event log, snapshot, exact Decision Replay, export bundle и журнал вмешательств.
+- Event log, snapshot, exact Decision Replay, export bundle, manifest, каталог, отчёт/графики и журнал вмешательств.
 - Observer UI с агентским инспектором и историей.
 - Локальный Windows-запуск без обязательного Docker.
 
@@ -35,6 +35,8 @@
 - Технологическая эволюция, профессии и обучение через наблюдение.
 - Discovery detector, causal graph, World Consciousness и макроиндексы.
 - Dynamic Mind, исполняемые плагины, массовые и распределённые запуски.
+- Формальный security scan, deployment threat model и public-release audit после заморозки
+  отдельного публичного релизного кандидата.
 
 ## Не является критерием приёмки
 

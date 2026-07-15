@@ -42,6 +42,32 @@ class ExperimentRunner:
         self.decisions: list[RecordedDecision] = []
         self.interventions: list[InterventionRecord] = []
 
+    def record_annotation(
+        self,
+        *,
+        actor: str,
+        reason: str,
+        kind: str = "researcher_annotation",
+    ) -> InterventionRecord:
+        """Record explicit researcher context without mutating the authoritative world.
+
+        The MVP deliberately has no free-form world-editing control path.  A
+        researcher can still declare an annotation before export, and that
+        declaration is carried by the immutable experiment bundle and its
+        reproducibility manifest.  State-changing controls must be modelled as
+        authoritative world actions in a later, separately reviewed contract.
+        """
+
+        record = InterventionRecord(
+            intervention_id=f"intervention-{len(self.interventions) + 1:06d}",
+            game_minute=self.engine.state.game_minute,
+            kind=kind,
+            actor=actor,
+            reason=reason,
+        )
+        self.interventions.append(record)
+        return record
+
     async def step(self):
         kind = self.engine.next_scheduled_kind()
         if kind is None:

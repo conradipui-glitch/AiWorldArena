@@ -29,6 +29,14 @@ class ExperimentConfig(ExperimentModel):
     mode: ExperimentMode = ExperimentMode.SCRIPTED
     model_assignments: tuple[ModelAssignment, ...] = ()
     duration_minutes: Literal[10080] = 10_080
+    run_nonce: str | None = Field(
+        default=None,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+        description=(
+            "A run-local namespace. It changes run identity without changing the "
+            "reproduced world contract."
+        ),
+    )
 
     @model_validator(mode="after")
     def mode_matches_assignments(self) -> "ExperimentConfig":

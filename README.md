@@ -4,11 +4,14 @@
 
 ## Текущий статус
 
-**Блок 4 — Experimental MVP реализован.** Три агента могут автономно прожить семь
-игровых дней на острове, пройти дождь и кризисное похолодание, обмениваться ресурсами,
-давать и нарушать обещания и совместно построить хранилище. React + Phaser остаются
-русскоязычным окном наблюдения, а не источником состояния. Государства, готовые рынки,
-технологии, поколения и боевая система не входят в текущий scope.
+**Блок 5 — Research Layer реализован для локального research checkpoint.** Три агента могут автономно
+прожить семь игровых дней на острове, пройти дождь и кризисное похолодание, обмениваться
+ресурсами, давать и нарушать обещания и совместно построить хранилище. Каждый завершённый
+запуск теперь получает проверяемый catalog entry, reproducibility manifest, JSON/Markdown/SVG
+отчёт и безопасную research lineage. React + Phaser остаются русскоязычным окном наблюдения,
+а не источником состояния. Государства, готовые рынки, технологии, поколения и боевая система
+не входят в текущий scope. Это локальная исследовательская сборка, не публичный релиз:
+формальный security audit по решению оператора отложен до отдельной подготовки публичного выпуска.
 
 ## Быстрый запуск на Windows
 
@@ -49,6 +52,25 @@ Set-Location ..
 
 Подробная граница клиента и сервера — в `docs/OBSERVER_BLOCK_3.md`.
 
+### Запуск двойным кликом
+
+После однократной подготовки Python-окружения и `client/node_modules` можно просто открыть
+`START_AIWORLD_ARENA.bat` в корне репозитория. Он не создаст второй экземпляр готового
+наблюдателя, дождётся API и UI на `127.0.0.1`, затем откроет браузер. Ошибка подготовки
+зависимостей или занятых портов выводится в окно запуска; логи `work/observer-*.log` появляются
+после попытки поднять дочерние процессы.
+
+Если стандартные порты заняты, можно задать пару локальных портов перед запуском:
+
+```powershell
+$env:AIWORLD_API_PORT = 8011
+$env:AIWORLD_UI_PORT = 5175
+.\START_AIWORLD_ARENA.bat
+```
+
+Для автоматической проверки без открытия браузера предусмотрены `AIWORLD_NO_BROWSER=1` и
+`AIWORLD_NO_PAUSE=1`; обычному пользователю их задавать не нужно.
+
 ## Семидневный эксперимент и exact replay
 
 Полный воспроизводимый Scripted Test Mode:
@@ -74,6 +96,35 @@ Controlled Mode принимает одну общую Ollama-модель, Natu
 
 Повторный живой вызов Ollama не считается exact replay: он является новым
 экспериментальным прогоном. Точные контракты — в `docs/EXPERIMENT_BLOCK_4.md`.
+
+## Исследовательский слой
+
+Любой запуск, созданный командой `experiment`, автоматически получает bundle, manifest и
+читабельный отчёт. Базовый Scripted run маркируется `clean`; новый запуск тех же условий —
+`experimental`; ветка от проверенного начального снимка или запуск с явной аннотацией
+исследователя — `modified`.
+
+```powershell
+# Каталог проверенных запусков
+.\scripts\research.ps1 catalog-experiments
+
+# Новый вызов тех же моделей; это не exact replay
+.\scripts\research.ps1 rerun-experiment three-agents-seven-days --name rerun-01
+
+# Минимальная репликация требует не менее двух новых запусков
+.\scripts\research.ps1 replicate-experiment three-agents-seven-days --prefix replica --count 2
+
+# Полная дочерняя история только от снимка bundle.initial_state (игровая минута 0)
+.\scripts\research.ps1 branch-experiment three-agents-seven-days --name branch-01
+
+# Сравнение и регенерация JSON/Markdown/SVG отчёта
+.\scripts\research.ps1 compare-experiments three-agents-seven-days rerun-01
+.\scripts\research.ps1 report-experiment three-agents-seven-days
+```
+
+Research API доступен только на чтение: `GET /v1/experiments`, manifest, report и comparison.
+Он не раскрывает cognition и не запускает модели из браузера. Полный контракт и доказанные
+границы — в `docs/RESEARCH_BLOCK_5.md`.
 
 Проверки:
 
@@ -123,7 +174,9 @@ snapshot проходит schema, hash-chain и семантическую пр�
 - `docs/checkpoints/BLOCK_2.md` — состав и статус checkpoint второго блока.
 - `docs/OBSERVER_BLOCK_3.md` — запуск и ограничения Visual Observer MVP.
 - `docs/EXPERIMENT_BLOCK_4.md` — семидневный сценарий, export, метрики и replay.
+- `docs/RESEARCH_BLOCK_5.md` — каталог, manifest, rerun, replication, branch, reports и ограничения.
 - `docs/checkpoints/BLOCK_4.md` — фактический checkpoint четвёртого блока.
+- `docs/checkpoints/BLOCK_5.md` — фактический checkpoint исследовательского слоя.
 - `docs/smoke/OLLAMA_BLOCK_2.md` — отдельный живой Ollama smoke.
 
 ## Checkpoint policy

@@ -266,7 +266,7 @@ class ExperimentRun(StrictModel):
     mode: ExperimentMode = ExperimentMode.SCRIPTED
     status: RunStatus = RunStatus.CREATED
     modified: bool = False
-    engine_version: str = "0.4.0"
+    engine_version: str = "0.5.0"
     rules_version: str = "core-v2"
     schema_version: Literal["world-state-v2", "world-state-v3"] = "world-state-v3"
     ends_minute: int | None = Field(default=None, ge=1)

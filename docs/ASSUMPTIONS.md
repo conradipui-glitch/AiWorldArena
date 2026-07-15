@@ -29,10 +29,28 @@
 - Natural Mode требует минимум два разных model binding; Controlled Mode требует один общий binding.
 - Дождь и кризисное похолодание являются авторитетными событиями мира, а не UI-декорацией.
 
+## Validated in Block 5
+
+- `research/` внутри fixed experiment output root хранит только derived catalog, manifests,
+  reports, comparisons и branch snapshots. Он не импортируется simulation kernel и не получает
+  write path к живому миру.
+- `clean`, `modified` и `experimental` — composable provenance marks. Они описывают метод
+  получения артефакта, а не качество или ценность поведения агентов.
+- `experimental rerun` и `replica` создают новый `run_id` через `run_nonce`, но сохраняют
+  initial world/personality contract. Повторный вызов LLM не обещает совпадение решений.
+- Минимальная ветка Block 5 начинается только от `bundle.initial_state` в игровой минуте 0.
+  Bundle v1 не содержит атомарной mid-run cognition snapshot, поэтому ветвление из середины
+  истории не заявляется как реализованное.
+- Аннотация исследователя фиксируется в intervention journal и маркирует export `modified`, но
+  не меняет authoritative world. Свободное редактирование мира не является control path MVP.
+- Reproducibility manifest и canonical digests обнаруживают повреждение и рассогласование; они
+  не являются цифровой подписью внешнего происхождения.
+
 ## Deferred validation
 
 - Performance targets выше десяти scripted agents устанавливаются после работающего MVP.
 - Live Ollama embedding smoke откладывается до появления подходящей локальной embedding model.
-- Формальный repository-wide security scan и release security audit выполняются в блоке 5. Попытка
-  сканирования во время разработки Block 2 не была запечатана после изменения target snapshot;
-  финальный security report для Block 2 не существует.
+- Подписанный provenance, branch из промежуточной cognition snapshot, массовые репликации,
+  causal graph и статистические выводы выходят за MVP. Они не подменяются нынешними reports.
+- Формального repository-wide security scan или security certification для локального checkpoint
+  нет: оператор явно отложил его до подготовки публичного релиза.

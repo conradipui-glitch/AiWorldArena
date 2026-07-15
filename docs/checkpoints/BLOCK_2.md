@@ -74,9 +74,9 @@
 
 - Строгие provider/model boundaries, prompt isolation, resource bounds, safe fallback, snapshot
   validation и import provenance покрываются адресными тестами Block 2.
-- Формальный repository-wide security scan намеренно отложен до Block 5. Промежуточный scan во
-  время разработки Block 2 не был запечатан после изменения target snapshot; финального отчёта
-  безопасности для этого блока нет и в checkpoint он не заявляется.
+- Формальный repository-wide security scan не входит в этот checkpoint. Позднее оператор явно
+  отложил такой аудит до подготовки публичного релиза; финального отчёта безопасности для этого
+  блока нет и в checkpoint он не заявляется.
 
 ## Известные ограничения
 

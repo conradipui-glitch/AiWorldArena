@@ -66,9 +66,13 @@ import и shell запрещены.
 Подмена event log, смешение branch namespaces или незаписанное вмешательство способно
 сфальсифицировать эксперимент. Неключевые canonical hashes проверяют целостность, но атакующий,
 который может переписать импортируемый файл, может пересчитать их; это не цифровая подпись.
-Текущие контроли: semantic validation, import provenance и explicit `modified` status. Immutable
-signed provenance, статусы `tampered/invalid`, version manifest и offline Decision Replay остаются
-последующими слоями защиты.
+Текущие контроли: semantic validation, import provenance, explicit `modified` status, exact
+Decision Replay, machine-checkable reproducibility manifest, immutable parent bundle digest и
+отдельные run namespaces. Research artifacts пишутся только под fixed root, используют safe slug,
+отклоняют symbolic links, ограничивают размер и записываются через atomic replace. Read-only
+research API не раскрывает cognition и проверяет соответствие catalog → manifest → bundle перед
+выдачей данных. Immutable signed provenance, trusted timestamp и статусы `tampered/invalid`
+остаются последующими слоями защиты.
 
 ### Out of scope for the local MVP
 
@@ -101,7 +105,9 @@ signed provenance, статусы `tampered/invalid`, version manifest и offlin
 
 ## Verification status
 
-Модель угроз обновлена для реализованных границ Block 2. Формальный repository-wide security scan
-на этом этапе намеренно отложен: промежуточный scan не был запечатан после изменения target
-snapshot, и финальный security report не создавался. Полный формальный scan остаётся обязательной
-работой Block 5 перед release candidate.
+Модель угроз обновлена для реализованных границ Block 5, включая Research Layer и локальный
+launcher. Адресные тесты проверяют границы bundle/manifest/catalog, safe persistence и отсутствие
+cognition в research API. Формальный repository-wide security scan и security certification
+**не выполнялись**: оператор явно отложил их до подготовки публичного релиза. Текущий Block 5
+checkpoint является локальной исследовательской сборкой и не заявляет готовность к публичному
+развёртыванию. Перед любым external exposure требуется новый audit уже по замороженному target.

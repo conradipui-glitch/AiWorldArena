@@ -30,7 +30,8 @@
 ## Ограничения
 
 - Полный живой семидневный Ollama run не входит в обязательный CI и зависит от выбранных моделей.
-- Replication, branching, comparison/divergence и release security audit остаются Block 5.
+- Replication, time-zero branching и comparison/divergence реализованы в Block 5.
+- Formal security audit отложен оператором до подготовки публичного релиза.
 - Bundle digests не являются цифровой подписью внешнего происхождения.
 
 ## Git policy

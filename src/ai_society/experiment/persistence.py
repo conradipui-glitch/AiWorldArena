@@ -91,6 +91,7 @@ class ExperimentBundleRepository:
             or bundle.metrics.run_id != final.run.run_id
             or bundle.metrics.duration_minutes != final.game_minute
             or bundle.metrics.decisions != len(bundle.decisions)
+            or bundle.metrics.interventions != len(bundle.interventions)
         ):
             raise ExperimentBundleError("bundle completion metrics are inconsistent")
         if [item.ordinal for item in bundle.decisions] != list(

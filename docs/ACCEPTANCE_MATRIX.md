@@ -113,6 +113,42 @@
 - Full Python suite: `88 passed`; total coverage: `88%`.
 - Client: `npx tsc --noEmit` и `npm run build` проходят.
 
+## Блок 5
+
+| Требование | Проверка | Статус |
+|---|---|---|
+| Baseline получает каталог, manifest, JSON/Markdown/SVG report и `clean` mark | `test_catalog_manifest_report_and_clean_mark_are_verified` | PASS |
+| Повторное имя не может перезаписать уже зарегистрированный bundle, manifest или catalog | `test_duplicate_artifact_name_is_rejected_before_any_registered_data_changes` | PASS |
+| Явная аннотация записывается в intervention journal и маркирует run `modified` | `test_explicit_annotation_is_journaled_and_marks_run_modified` | PASS |
+| Rerun создаёт новый namespace, сохраняет world/personality contract и получает `experimental` mark | `test_experimental_rerun_has_a_new_namespace_and_explicit_mark`; CLI acceptance | PASS |
+| Replication не допускает меньше двух новых запусков | `test_research_cli_reads_artifacts_and_rejects_nonminimal_replication`; CLI acceptance с `--count 2` | PASS |
+| Branch только из time-zero snapshot сохраняет parent contract и независимый namespace | `test_initial_snapshot_branch_preserves_parent_contract_and_namespace`; CLI acceptance | PASS |
+| Сравнение находит первую semantic разницу только у сопоставимых запусков | `test_comparison_finds_first_semantic_behavior_divergence`; `test_incomparable_runs_do_not_claim_a_first_behavioral_divergence` | PASS |
+| Research API выдаёт только metadata, не раскрывает cognition и не пишет comparison на GET | `test_research_api_exposes_metadata_not_cognition` | PASS |
+| API отклоняет manifest/report/catalog при пропавшем или invalid catalogued bundle | `test_research_api_rejects_metadata_for_a_missing_catalogued_bundle` | PASS |
+| CLI читает catalog/report и регенерирует derived report | `test_research_cli_reads_artifacts_and_rejects_nonminimal_replication` | PASS |
+| Windows launcher корректно поднимает новую пару API/UI, proxy и главную страницу на чистых портах | `scripts/test-launcher.ps1`; ручной Windows smoke | PASS |
+| Формальный repository-wide security scan и public-release audit | Явно отложены оператором до подготовки публичного выпуска | DEFERRED BY OPERATOR |
+
+## Результат блока 5
+
+- Acceptance baseline: `block5-final`, seed `20260715`, `48×48`, `10080` минут,
+  `4761` решений и `4773` событий планировщика.
+- `state_hash=1f7d401e695f6ff42396af5d9ce30f6b739cd9bfcae6d0ee0495e2ce2e6dc7aa`;
+  `event_digest=881ffd7eae17c64e3e2d1815a5e3dc6378b6fbd6fe7dfa11d260c5f989d249dd`.
+- Decision Replay baseline прошёл без сети; rerun, две replica, time-zero branch, comparison,
+  catalog и report прошли отдельный CLI acceptance.
+- `START_AIWORLD_ARENA.bat` проверен под Windows PowerShell на уже запущенном observer и на
+  чистой паре портов: API `/health`, UI proxy `/health` и главная страница вернули `ok/200`.
+- Full Python suite: `99 passed`, total coverage `87%` на Python 3.12.13; один известный
+  `StarletteDeprecationWarning` относится к внешнему `TestClient` dependency.
+- `python -m compileall -q src tests`, `npx tsc --noEmit` и `npm run build` проходят.
+- Это локальный research checkpoint, а не публичный release candidate: формальный security audit
+  в этот блок не включён по прямому решению оператора.
+
 ## Условие завершения
 
-Все обязательные строки блока должны получить `PASS`. Известное ограничение допускается только если оно не скрывает обязательную часть и зафиксировано в этом документе.
+Все обязательные строки текущего локального scope должны получить `PASS`. Явно отложенная
+public-release проверка не считается выполненной и не позволяет заявлять security certification.
+Известное ограничение допускается только если оно не скрывает обязательную часть и зафиксировано
+в этом документе.

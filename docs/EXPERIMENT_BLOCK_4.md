@@ -57,4 +57,5 @@ Visual Observer по умолчанию запускает тот же русс�
 - Full seven-day Natural/Controlled run зависит от скорости и доступности выбранных Ollama-моделей.
 - UI не редактирует индивидуальные model binding; их назначает headless experiment CLI.
 - Cognition сохраняется в bundle, но не пересчитывается в exact replay.
-- Minimal replication, branching, comparison, divergence и подписанный provenance — Block 5.
+- Minimal replication, time-zero branching, comparison/divergence и machine-checkable provenance
+  manifest реализованы в Block 5; подписанный provenance остаётся последующим горизонтом.

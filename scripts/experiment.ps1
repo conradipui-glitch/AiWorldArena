@@ -5,7 +5,8 @@ param(
     [long]$Seed = 20260715,
     [ValidateSet(48, 64)]
     [int]$Size = 48,
-    [string]$Name = 'three-agents-seven-days'
+    [string]$Name = 'three-agents-seven-days',
+    [string[]]$Annotation = @()
 )
 
 $ErrorActionPreference = 'Stop'
@@ -24,6 +25,10 @@ $Arguments = @(
 if ($Models.Count -gt 0) {
     $Arguments += '--models'
     $Arguments += $Models
+}
+foreach ($Entry in $Annotation) {
+    $Arguments += '--annotation'
+    $Arguments += $Entry
 }
 
 & $Python @Arguments
