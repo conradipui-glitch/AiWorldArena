@@ -15,6 +15,11 @@ from ai_society.domain.enums import (
 )
 from ai_society.domain.models import AgentBodyState, AgentObservation, Position
 from ai_society.persistence.canonical import canonical_digest, canonical_json
+from ai_society.simulation.movement import (
+    movement_energy_cost,
+    movement_mode,
+    terrain_is_traversable,
+)
 
 
 class PromptModel(BaseModel):
@@ -35,6 +40,10 @@ class PromptInventoryItem(PromptModel):
 class PromptTile(PromptModel):
     position: Position
     terrain: TerrainType
+    distance: int = Field(ge=0)
+    walkable: bool
+    movement_mode: str
+    movement_energy_cost: int = Field(ge=0)
     elevation: int
     moisture: int
     light: int
@@ -45,6 +54,8 @@ class PromptResource(PromptModel):
     resource_id: str
     kind: ResourceKind
     position: Position
+    distance: int = Field(ge=0)
+    gatherable_now: bool
     visible_quantity: int = Field(ge=0)
 
 
@@ -53,6 +64,16 @@ class PromptVisibleAgent(PromptModel):
     name: str
     position: Position
     species: str
+    distance: int = Field(ge=0)
+    speakable_now: bool
+    attackable_now: bool
+
+
+class PromptAffordances(PromptModel):
+    move_targets_now: tuple[Position, ...]
+    gather_target_ids_now: tuple[str, ...]
+    speak_target_ids_now: tuple[str, ...]
+    attack_target_ids_now: tuple[str, ...]
 
 
 class PromptStructure(PromptModel):
@@ -144,6 +165,7 @@ class AgentPromptContext(PromptModel):
     body: AgentBodyState
     environment: PromptEnvironment
     position: Position
+    available_actions: PromptAffordances
     inventory: tuple[PromptInventoryItem, ...]
     visible_tiles: tuple[PromptTile, ...]
     visible_resources: tuple[PromptResource, ...]
@@ -188,6 +210,30 @@ class AgentContextBuilder:
         offers = observation.accessible_offers[-10:]
         commitments = observation.accessible_commitments[-10:]
         projects = observation.accessible_projects[-10:]
+        move_targets = tuple(
+            tile.position
+            for tile in observation.visible_tiles
+            if observation.position.manhattan_distance(tile.position) == 1
+            and terrain_is_traversable(
+                tile.terrain, energy=observation.body.energy
+            )
+        )
+        gather_targets = tuple(
+            node.entity_id
+            for node in observation.visible_resources
+            if node.quantity > 0
+            and observation.position.manhattan_distance(node.position) <= 1
+        )
+        speak_targets = tuple(
+            agent.agent_id
+            for agent in observation.visible_agents
+            if observation.position.manhattan_distance(agent.position) <= 4
+        )
+        attack_targets = tuple(
+            agent.agent_id
+            for agent in observation.visible_agents
+            if observation.position.manhattan_distance(agent.position) <= 1
+        )
         return AgentPromptContext(
             run_id=observation.run_id,
             game_minute=observation.game_minute,
@@ -205,6 +251,12 @@ class AgentContextBuilder:
                 crisis=observation.environment.crisis,
             ),
             position=observation.position,
+            available_actions=PromptAffordances(
+                move_targets_now=move_targets,
+                gather_target_ids_now=gather_targets,
+                speak_target_ids_now=speak_targets,
+                attack_target_ids_now=attack_targets,
+            ),
             inventory=tuple(
                 PromptInventoryItem(resource=resource, amount=amount)
                 for resource, amount in sorted(
@@ -215,6 +267,12 @@ class AgentContextBuilder:
                 PromptTile(
                     position=tile.position,
                     terrain=tile.terrain,
+                    distance=observation.position.manhattan_distance(tile.position),
+                    walkable=terrain_is_traversable(
+                        tile.terrain, energy=observation.body.energy
+                    ),
+                    movement_mode=movement_mode(tile.terrain),
+                    movement_energy_cost=movement_energy_cost(tile.terrain),
                     elevation=tile.elevation,
                     moisture=tile.moisture,
                     light=tile.light,
@@ -227,6 +285,10 @@ class AgentContextBuilder:
                     resource_id=node.entity_id,
                     kind=node.kind,
                     position=node.position,
+                    distance=observation.position.manhattan_distance(node.position),
+                    gatherable_now=(
+                        observation.position.manhattan_distance(node.position) <= 1
+                    ),
                     visible_quantity=node.quantity,
                 )
                 for node in observation.visible_resources[:64]
@@ -249,6 +311,13 @@ class AgentContextBuilder:
                     name=agent.name,
                     position=agent.position,
                     species=agent.species,
+                    distance=observation.position.manhattan_distance(agent.position),
+                    speakable_now=(
+                        observation.position.manhattan_distance(agent.position) <= 4
+                    ),
+                    attackable_now=(
+                        observation.position.manhattan_distance(agent.position) <= 1
+                    ),
                 )
                 for agent in observation.visible_agents[:30]
             ),

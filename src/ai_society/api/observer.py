@@ -927,9 +927,23 @@ class RunRegistry:
             amount = event.payload.get("amount", 1)
             return f"{actor} собирает {resource}: {amount}"
         if event.kind is WorldEventKind.AGENT_MOVED:
+            if event.payload.get("movement_mode") == "swim":
+                return f"{actor} плывёт по воде"
             return f"{actor} перемещается по карте"
         if event.kind is WorldEventKind.ACTION_REJECTED:
-            return f"{actor}: действие отклонено правилами мира"
+            action = ACTION_LABELS.get(str(event.payload.get("action", "")), "Действие")
+            reason = {
+                "target is not adjacent": "цель слишком далеко для одного шага",
+                "target is outside the world": "цель находится за границей мира",
+                "target terrain is not walkable": "путь преграждает скала",
+                "too exhausted to swim": "не хватает сил, чтобы плыть дальше",
+                "resource is unavailable": "ресурс больше не существует",
+                "resource is too far away": "до ресурса сначала нужно дойти",
+                "resource is depleted": "ресурс исчерпан",
+                "resource is not in inventory": "нужного ресурса нет в инвентаре",
+                "resource is not consumable": "этот ресурс нельзя употребить",
+            }.get(str(event.payload.get("reason", "")), "условия действия не выполнены")
+            return f"{actor} · {action.lower()}: {reason}"
         if event.kind is WorldEventKind.MESSAGE_SENT:
             message = engine.state.messages.get(str(event.payload.get("message_id", "")))
             return f"{actor}: «{message.content}»" if message is not None else f"{actor} говорит"

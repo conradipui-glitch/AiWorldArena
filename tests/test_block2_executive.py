@@ -6,7 +6,9 @@ import pytest
 from ai_society.cognition.embeddings import DeterministicEmbeddingProvider
 from ai_society.cognition.repository import SQLiteCognitionRepository
 from ai_society.domain.enums import MemoryLayer, TerrainType, WorldEventKind
-from ai_society.domain.models import ResourceNode
+from ai_society.domain.intents import GatherIntent, MoveIntent
+from ai_society.domain.models import Position, ResourceNode
+from ai_society.executive.context import AgentContextBuilder
 from ai_society.executive.layer import ExecutiveLayer
 from ai_society.executive.runner import ExecutiveRunner
 from ai_society.providers.contracts import (
@@ -20,6 +22,11 @@ from ai_society.providers.registry import ProviderRegistry
 from ai_society.simulation.engine import SimulationEngine
 from ai_society.simulation.generation import generate_world
 from ai_society.simulation.policies import ScriptedPolicy
+from ai_society.simulation.movement import (
+    movement_energy_cost,
+    movement_mode,
+    terrain_is_traversable,
+)
 
 
 def make_engine(agent_names: list[str] | None = None) -> SimulationEngine:
@@ -39,6 +46,87 @@ def configure_fake(engine: SimulationEngine, provider: FakeModelProvider) -> Pro
         available_bindings={(provider.provider_id, provider.model)},
     )
     return registry
+
+
+def test_context_marks_immediately_available_movement_and_gathering() -> None:
+    engine = make_engine()
+    observation = engine.observe_agent("agent-001")
+    context = AgentContextBuilder().build(observation, [], [])
+
+    assert context.available_actions.move_targets_now
+    assert all(
+        observation.position.manhattan_distance(position) == 1
+        for position in context.available_actions.move_targets_now
+    )
+    assert set(context.available_actions.gather_target_ids_now) == {
+        resource.entity_id
+        for resource in observation.visible_resources
+        if observation.position.manhattan_distance(resource.position) <= 1
+    }
+    assert all(
+        tile.walkable
+        is terrain_is_traversable(
+            tile.terrain, energy=observation.body.energy
+        )
+        for tile in context.visible_tiles
+    )
+    assert all(
+        tile.movement_mode == movement_mode(tile.terrain)
+        and tile.movement_energy_cost == movement_energy_cost(tile.terrain)
+        for tile in context.visible_tiles
+    )
+    assert all(
+        resource.gatherable_now is (resource.distance <= 1)
+        for resource in context.visible_resources
+    )
+
+
+def test_visible_distant_gather_intent_becomes_one_physical_step() -> None:
+    engine = make_engine()
+    agent = engine.state.agents["agent-001"]
+    observation = engine.observe_agent("agent-001")
+    walkable = {
+        tile.position
+        for tile in observation.visible_tiles
+        if tile.terrain not in {TerrainType.WATER, TerrainType.ROCK}
+    }
+    first_steps = sorted(
+        (
+            position
+            for position in walkable
+            if agent.position.manhattan_distance(position) == 1
+        ),
+        key=lambda position: (position.y, position.x),
+    )
+    destination = next(
+        position
+        for first in first_steps
+        for position in walkable
+        if first.manhattan_distance(position) == 1
+        and agent.position.manhattan_distance(position) == 2
+    )
+    resource = ResourceNode(
+        entity_id="resource-999999",
+        kind="wood",
+        position=destination,
+        quantity=4,
+        max_quantity=4,
+    )
+    engine.state.resources[resource.entity_id] = resource
+    observation = engine.observe_agent("agent-001")
+
+    grounded = ExecutiveLayer._ground_intent(
+        GatherIntent(
+            target_id=resource.entity_id,
+            amount=1,
+            reason="Иду к видимой древесине, чтобы затем собрать её.",
+        ),
+        observation,
+    )
+
+    assert isinstance(grounded, MoveIntent)
+    assert agent.position.manhattan_distance(grounded.target) == 1
+    assert grounded.target in walkable
 
 
 def test_hot_swap_fails_closed_without_validated_available_bindings() -> None:

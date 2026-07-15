@@ -60,11 +60,58 @@ def _resource_for_tile(
 
 
 def _spawn_positions(tiles: list[Tile], agent_count: int) -> list[Position]:
-    walkable = [
+    walkable_set = {
         tile.position
         for tile in tiles
         if tile.terrain not in {TerrainType.WATER, TerrainType.ROCK}
+    }
+    components: list[set[Position]] = []
+    remaining_tiles = set(walkable_set)
+    while remaining_tiles:
+        origin = min(remaining_tiles, key=lambda position: (position.y, position.x))
+        component = {origin}
+        frontier = [origin]
+        remaining_tiles.remove(origin)
+        while frontier:
+            current = frontier.pop()
+            for neighbor in (
+                Position(x=current.x - 1, y=current.y) if current.x > 0 else None,
+                Position(x=current.x + 1, y=current.y),
+                Position(x=current.x, y=current.y - 1) if current.y > 0 else None,
+                Position(x=current.x, y=current.y + 1),
+            ):
+                if neighbor is not None and neighbor in remaining_tiles:
+                    remaining_tiles.remove(neighbor)
+                    component.add(neighbor)
+                    frontier.append(neighbor)
+        components.append(component)
+
+    components.sort(
+        key=lambda component: (
+            -len(component),
+            min((position.y, position.x) for position in component),
+        )
+    )
+    if not components:
+        raise ValueError("generated world does not have walkable spawn tiles")
+    inhabited_component = components[0]
+    walkable = [
+        position
+        for position in inhabited_component
+        if sum(
+            neighbor in inhabited_component
+            for neighbor in (
+                Position(x=position.x - 1, y=position.y) if position.x > 0 else None,
+                Position(x=position.x + 1, y=position.y),
+                Position(x=position.x, y=position.y - 1) if position.y > 0 else None,
+                Position(x=position.x, y=position.y + 1),
+            )
+            if neighbor is not None
+        )
+        >= 2
     ]
+    if len(walkable) < agent_count:
+        walkable = list(inhabited_component)
     if len(walkable) < agent_count:
         raise ValueError("generated world does not have enough walkable spawn tiles")
     walkable.sort(key=lambda position: (position.y, position.x))

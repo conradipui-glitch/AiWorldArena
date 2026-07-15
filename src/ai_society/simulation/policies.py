@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Protocol
 
-from ai_society.domain.enums import ResourceKind, TerrainType
+from ai_society.domain.enums import ResourceKind
 from ai_society.domain.intents import (
     AttackIntent,
     AnyIntent,
@@ -15,6 +15,7 @@ from ai_society.domain.intents import (
 )
 from ai_society.domain.models import AgentObservation, Position, ResourceNode, Tile
 from ai_society.simulation.rng import DeterministicRng
+from ai_society.simulation.movement import terrain_is_traversable
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,7 +66,9 @@ class ScriptedPolicy:
                 key=lambda item: observation.position.manhattan_distance(item.position),
             )
             candidates = self._walkable_neighbors(
-                observation.visible_tiles, observation.position
+                observation.visible_tiles,
+                observation.position,
+                observation.body.energy,
             )
             if candidates:
                 destination = max(
@@ -144,7 +147,11 @@ class ScriptedPolicy:
                     reason=f"move toward visible {target.kind.value}",
                 )
 
-        candidates = self._walkable_neighbors(observation.visible_tiles, observation.position)
+        candidates = self._walkable_neighbors(
+            observation.visible_tiles,
+            observation.position,
+            observation.body.energy,
+        )
         if candidates:
             return MoveIntent(
                 target=candidates[rng.randbelow(len(candidates))],
@@ -175,7 +182,11 @@ class ScriptedPolicy:
     def _step_toward(
         self, observation: AgentObservation, target: Position
     ) -> Position | None:
-        candidates = self._walkable_neighbors(observation.visible_tiles, observation.position)
+        candidates = self._walkable_neighbors(
+            observation.visible_tiles,
+            observation.position,
+            observation.body.energy,
+        )
         if not candidates:
             return None
         return min(
@@ -188,12 +199,14 @@ class ScriptedPolicy:
         )
 
     @staticmethod
-    def _walkable_neighbors(tiles: list[Tile], current: Position) -> list[Position]:
+    def _walkable_neighbors(
+        tiles: list[Tile], current: Position, energy: int
+    ) -> list[Position]:
         result = [
             tile.position
             for tile in tiles
             if current.manhattan_distance(tile.position) == 1
-            and tile.terrain not in {TerrainType.WATER, TerrainType.ROCK}
+            and terrain_is_traversable(tile.terrain, energy=energy)
         ]
         result.sort(key=lambda position: (position.y, position.x))
         return result

@@ -76,6 +76,7 @@ from ai_society.simulation.decisions import (
 )
 from ai_society.simulation.policies import AgentPolicy, PolicyDecision
 from ai_society.simulation.rng import DeterministicRng
+from ai_society.simulation.movement import SWIM_ENERGY_COST, movement_mode
 
 
 ACTION_DURATIONS: dict[ActionKind, int] = {
@@ -359,8 +360,14 @@ class SimulationEngine:
             tile = self.state.tile_at(intent.target)
             if tile is None:
                 return self._reject_intent(agent_id, intent, "target is outside the world")
-            if tile.terrain in {TerrainType.WATER, TerrainType.ROCK}:
+            if tile.terrain is TerrainType.ROCK:
                 return self._reject_intent(agent_id, intent, "target terrain is not walkable")
+            energy_cost = 0
+            if tile.terrain is TerrainType.WATER:
+                if agent.body.energy < SWIM_ENERGY_COST:
+                    return self._reject_intent(agent_id, intent, "too exhausted to swim")
+                energy_cost = SWIM_ENERGY_COST
+                agent.body.energy -= energy_cost
             previous = agent.position
             agent.position = intent.target
             return self._record_success(
@@ -370,6 +377,9 @@ class SimulationEngine:
                 {
                     "from": f"{previous.x},{previous.y}",
                     "to": f"{intent.target.x},{intent.target.y}",
+                    "movement_mode": movement_mode(tile.terrain),
+                    "energy_cost": energy_cost,
+                    "energy": agent.body.energy,
                 },
             )
 
@@ -378,7 +388,7 @@ class SimulationEngine:
             if resource is None:
                 return self._reject_intent(agent_id, intent, "resource is unavailable")
             if agent.position.manhattan_distance(resource.position) > 1:
-                return self._reject_intent(agent_id, intent, "resource is unavailable")
+                return self._reject_intent(agent_id, intent, "resource is too far away")
             if resource.quantity < intent.amount:
                 return self._reject_intent(agent_id, intent, "resource is depleted")
             resource.quantity -= intent.amount

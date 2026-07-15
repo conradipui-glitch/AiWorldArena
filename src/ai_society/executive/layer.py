@@ -14,14 +14,16 @@ from ai_society.cognition.repository import (
     CognitionRepositoryError,
     SQLiteCognitionRepository,
 )
-from ai_society.domain.enums import IntelligenceTier
+from ai_society.domain.enums import IntelligenceTier, TerrainType
 from ai_society.domain.intents import (
     MODEL_INTENT_SCHEMA,
     AnyIntent,
+    GatherIntent,
+    MoveIntent,
     WaitIntent,
     parse_intent,
 )
-from ai_society.domain.models import ActionResult
+from ai_society.domain.models import ActionResult, AgentObservation, Position
 from ai_society.executive.context import AgentContextBuilder
 from ai_society.executive.projector import CognitionProjector
 from ai_society.persistence.canonical import canonical_digest, canonical_json
@@ -33,6 +35,7 @@ from ai_society.providers.contracts import (
 )
 from ai_society.providers.registry import ProviderRegistry
 from ai_society.simulation.decisions import DecisionResolution, DecisionTicket
+from ai_society.simulation.movement import terrain_is_traversable
 
 
 SYSTEM_PROMPT = """Ты — заменяемый механизм принятия решений одного агента симуляции.
@@ -44,8 +47,9 @@ SYSTEM_PROMPT = """Ты — заменяемый механизм приняти
 Все видимые человеку текстовые поля ответа — reason, message, agreement_terms и подобные — пиши только по-русски.
 Поле reason — короткое публичное объяснение выбранного намерения от лица персонажа: что он заметил, чего хочет добиться и почему выбрал это действие.
 Выбирай только одно выполнимое прямо сейчас действие, а не конечную точку многошагового плана.
-Для move укажи ровно одну соседнюю проходимую клетку из visible_tiles (манхэттенское расстояние от position равно 1).
+Для move укажи ровно одну соседнюю доступную клетку из available_actions.move_targets_now (манхэттенское расстояние от position равно 1). По суше персонаж идёт, по воде плывёт; плавание расходует 8 энергии за клетку. Скалы непроходимы.
 Для gather и attack цель должна быть видна и находиться не дальше 1 клетки; для speak цель должна быть видна и находиться не дальше 4 клеток.
+Поле available_actions содержит действия, которые физически доступны прямо сейчас. Для немедленного действия используй идентификаторы и клетки из этого поля. Ресурс с gatherable_now=false можно выбрать как долгосрочную цель, но сначала нужно двигаться к нему.
 Для строительства location должна совпадать с текущей position. Костёр стоит 2 wood; укрытие или хранилище — 4 wood и 2 stone. Не строй без нужных ресурсов в inventory.
 Используй только идентификаторы ресурсов, существ, строений, сообщений, предложений и обязательств, которые присутствуют в agent_context.
 Если желаемая цель пока недостижима, выбери ближайший допустимый шаг к ней, observe, rest или wait.
@@ -151,8 +155,9 @@ class ExecutiveLayer:
                 repair=False,
             )
             if first.intent is not None:
+                grounded_intent = self._ground_intent(first.intent, observation)
                 return DecisionResolution(
-                    intent=first.intent,
+                    intent=grounded_intent,
                     context_digest=context.digest,
                     attempt_count=1,
                     provider=observation.mind.provider,
@@ -185,8 +190,9 @@ class ExecutiveLayer:
                 repair=True,
             )
             if second.intent is not None:
+                grounded_intent = self._ground_intent(second.intent, observation)
                 return DecisionResolution(
-                    intent=second.intent,
+                    intent=grounded_intent,
                     context_digest=context.digest,
                     rejected_outputs=(first_code,),
                     attempt_count=2,
@@ -215,6 +221,101 @@ class ExecutiveLayer:
             )
         except (CognitionRepositoryError, sqlite3.Error, ProviderError, ValueError):
             self._record_operational_error("outcome_projection_failed")
+
+    @classmethod
+    def _ground_intent(
+        cls, intent: AnyIntent, observation: AgentObservation
+    ) -> AnyIntent:
+        destinations = None
+        if isinstance(intent, GatherIntent):
+            resource = next(
+                (
+                    item
+                    for item in observation.visible_resources
+                    if item.entity_id == intent.target_id and item.quantity > 0
+                ),
+                None,
+            )
+            if resource is None or observation.position.manhattan_distance(resource.position) <= 1:
+                return intent
+            destinations = {
+                tile.position
+                for tile in observation.visible_tiles
+                if terrain_is_traversable(
+                    tile.terrain, energy=observation.body.energy
+                )
+                and tile.position.manhattan_distance(resource.position) <= 1
+            }
+        elif isinstance(intent, MoveIntent):
+            if observation.position.manhattan_distance(intent.target) == 1:
+                return intent
+            target_tile = next(
+                (tile for tile in observation.visible_tiles if tile.position == intent.target),
+                None,
+            )
+            if target_tile is None:
+                return intent
+            if terrain_is_traversable(
+                target_tile.terrain, energy=observation.body.energy
+            ):
+                destinations = {intent.target}
+            else:
+                destinations = {
+                    tile.position
+                    for tile in observation.visible_tiles
+                    if terrain_is_traversable(
+                        tile.terrain, energy=observation.body.energy
+                    )
+                    and tile.position.manhattan_distance(intent.target) <= 1
+                }
+        else:
+            return intent
+
+        step = cls._first_visible_step(observation, destinations or set())
+        if step is None:
+            return intent
+        return MoveIntent(target=step, reason=intent.reason)
+
+    @staticmethod
+    def _first_visible_step(
+        observation: AgentObservation, destinations: set[Position]
+    ) -> Position | None:
+        walkable = {
+            tile.position
+            for tile in observation.visible_tiles
+            if terrain_is_traversable(
+                tile.terrain, energy=observation.body.energy
+            )
+        }
+        origin = observation.position
+        goals = destinations & walkable
+        if not goals or origin in goals:
+            return None
+        frontier = [origin]
+        predecessor = {origin: None}
+        reached = None
+        while frontier and reached is None:
+            current = frontier.pop(0)
+            neighbors = sorted(
+                (
+                    candidate
+                    for candidate in walkable
+                    if candidate not in predecessor
+                    and current.manhattan_distance(candidate) == 1
+                ),
+                key=lambda position: (position.y, position.x),
+            )
+            for neighbor in neighbors:
+                predecessor[neighbor] = current
+                if neighbor in goals:
+                    reached = neighbor
+                    break
+                frontier.append(neighbor)
+        if reached is None:
+            return None
+        while predecessor[reached] != origin:
+            reached = predecessor[reached]
+        return reached
 
     async def _attempt(
         self,
