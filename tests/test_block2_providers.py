@@ -105,6 +105,52 @@ def test_ollama_tags_chat_and_embed_contracts_use_bounded_nonstreaming_requests(
     asyncio.run(scenario())
 
 
+def test_ollama_can_merge_official_cloud_catalog_into_local_inventory() -> None:
+    def local_handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/tags"
+        return httpx.Response(
+            200,
+            json={"models": [{"name": "gpt-oss:120b-cloud", "size": 0}]},
+        )
+
+    def cloud_handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "ollama.com"
+        assert request.url.path == "/api/tags"
+        return httpx.Response(
+            200,
+            json={
+                "models": [
+                    {"name": "gpt-oss:120b"},
+                    {"name": "glm-5.2"},
+                    {"name": "qwen3.5:397b"},
+                ]
+            },
+        )
+
+    async def scenario() -> None:
+        local_client = httpx.AsyncClient(transport=httpx.MockTransport(local_handler))
+        cloud_client = httpx.AsyncClient(transport=httpx.MockTransport(cloud_handler))
+        provider = OllamaModelProvider(
+            OllamaConfig(include_official_cloud_catalog=True),
+            client=local_client,
+            cloud_client=cloud_client,
+        )
+        try:
+            models = await provider.list_models()
+        finally:
+            await local_client.aclose()
+            await cloud_client.aclose()
+
+        assert [item.model for item in models] == [
+            "glm-5.2:cloud",
+            "gpt-oss:120b-cloud",
+            "qwen3.5:397b-cloud",
+        ]
+        assert next(item for item in models if item.model == "glm-5.2:cloud").display_name == "glm-5.2 · облако"
+
+    asyncio.run(scenario())
+
+
 def test_ollama_errors_are_typed_and_do_not_echo_response_body() -> None:
     secret = "SECRET_PROVIDER_BODY"
 

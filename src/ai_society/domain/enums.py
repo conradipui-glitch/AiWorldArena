@@ -38,6 +38,7 @@ class ActionKind(StrEnum):
     RESPOND_TO_PROJECT = "respond_to_project"
     CONTRIBUTE_TO_PROJECT = "contribute_to_project"
     LEAVE_PROJECT = "leave_project"
+    ATTACK = "attack"
 
 
 class IntelligenceTier(StrEnum):
@@ -82,6 +83,10 @@ class WeatherKind(StrEnum):
     CLEAR = "clear"
     RAIN = "rain"
     COLD_SNAP = "cold_snap"
+    HEAT_WAVE = "heat_wave"
+    FOG = "fog"
+    STORM = "storm"
+    DROUGHT = "drought"
 
 
 class ProjectStatus(StrEnum):
@@ -180,3 +185,6 @@ class WorldEventKind(StrEnum):
     MODEL_REBOUND = "model_rebound"
     SNAPSHOT_IMPORTED = "snapshot_imported"
     SCHEDULED_EVENT_SKIPPED = "scheduled_event_skipped"
+    AGENT_SPAWNED = "agent_spawned"
+    AGENT_ATTACKED = "agent_attacked"
+    RESEARCHER_EVENT_TRIGGERED = "researcher_event_triggered"

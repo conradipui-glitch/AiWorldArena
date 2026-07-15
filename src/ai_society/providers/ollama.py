@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from urllib.parse import urlsplit
 
 import httpx
@@ -30,6 +31,7 @@ class OllamaConfig(BaseModel):
     max_model_output_bytes: int = Field(default=65_536, ge=1_024, le=262_144)
     structured_outputs: bool = True
     max_in_flight: int = Field(default=3, ge=1, le=16)
+    include_official_cloud_catalog: bool = False
 
     @model_validator(mode="after")
     def validate_endpoint(self) -> OllamaConfig:
@@ -130,9 +132,20 @@ class OllamaModelProvider:
         config: OllamaConfig | None = None,
         *,
         client: httpx.AsyncClient | None = None,
+        cloud_client: httpx.AsyncClient | None = None,
     ) -> None:
         self.config = config or OllamaConfig()
         self._http = _OllamaHttpClient(self.config, client)
+        self._owns_cloud_client = cloud_client is None
+        self._cloud_client = cloud_client or httpx.AsyncClient(
+            base_url="https://ollama.com",
+            headers={"Accept": "application/json"},
+            timeout=httpx.Timeout(12.0, connect=5.0),
+            follow_redirects=False,
+            trust_env=False,
+        )
+        self._cloud_cache: tuple[float, list[ModelDescriptor]] | None = None
+        self._local_models: set[str] = set()
 
     async def list_models(self) -> list[ModelDescriptor]:
         payload = await self._http.request_json("GET", "/api/tags")
@@ -173,10 +186,15 @@ class OllamaModelProvider:
                     "ollama_protocol_error", "Ollama model inventory is malformed"
                 ) from exc
             descriptors.append(descriptor)
-        descriptors.sort(key=lambda item: item.model)
-        return descriptors
+        self._local_models = {item.model for item in descriptors}
+        by_model = {item.model: item for item in descriptors}
+        if self.config.include_official_cloud_catalog:
+            for descriptor in await self._official_cloud_models():
+                by_model.setdefault(descriptor.model, descriptor)
+        return sorted(by_model.values(), key=lambda item: item.model)
 
     async def generate(self, request: ModelRequest) -> ModelResponse:
+        await self._ensure_cloud_model(request.model)
         body: dict[str, object] = {
             "model": request.model,
             "messages": [
@@ -232,6 +250,74 @@ class OllamaModelProvider:
 
     async def close(self) -> None:
         await self._http.close()
+        if self._owns_cloud_client:
+            await self._cloud_client.aclose()
+
+    async def _official_cloud_models(self) -> list[ModelDescriptor]:
+        now = time.monotonic()
+        if self._cloud_cache is not None and now - self._cloud_cache[0] < 300:
+            return self._cloud_cache[1]
+        try:
+            response = await self._cloud_client.get("https://ollama.com/api/tags")
+            response.raise_for_status()
+            if len(response.content) > self.config.max_json_response_bytes:
+                return []
+            payload = response.json()
+            raw_models = payload.get("models") if isinstance(payload, dict) else None
+            if not isinstance(raw_models, list):
+                return []
+            descriptors: list[ModelDescriptor] = []
+            for raw in raw_models:
+                if not isinstance(raw, dict):
+                    continue
+                remote_name = raw.get("name") or raw.get("model")
+                if not isinstance(remote_name, str) or not 1 <= len(remote_name) <= 120:
+                    continue
+                alias = self._cloud_alias(remote_name)
+                descriptors.append(
+                    ModelDescriptor(
+                        provider=self.provider_id,
+                        model=alias,
+                        display_name=f"{remote_name} · облако",
+                        digest=(
+                            raw.get("digest")
+                            if isinstance(raw.get("digest"), str)
+                            and len(raw["digest"]) <= 256
+                            else None
+                        ),
+                    )
+                )
+        except (httpx.HTTPError, ValueError, TypeError, json.JSONDecodeError):
+            return []
+        descriptors.sort(key=lambda item: item.model)
+        self._cloud_cache = (now, descriptors)
+        return descriptors
+
+    async def _ensure_cloud_model(self, model: str) -> None:
+        if model in self._local_models or not self._is_cloud_alias(model):
+            return
+        payload = await self._http.request_json(
+            "POST", "/api/pull", payload={"model": model, "stream": False}
+        )
+        if str(payload.get("status", "")).casefold() not in {"success", "pulling manifest"}:
+            raise ProviderError(
+                "ollama_cloud_pull_failed",
+                "Ollama could not activate the selected cloud model",
+            )
+        self._local_models.add(model)
+
+    @staticmethod
+    def _cloud_alias(remote_name: str) -> str:
+        if ":" not in remote_name:
+            return f"{remote_name}:cloud"
+        family, tag = remote_name.rsplit(":", 1)
+        if tag == "cloud" or tag.endswith("-cloud"):
+            return remote_name
+        return f"{family}:{tag}-cloud"
+
+    @staticmethod
+    def _is_cloud_alias(model: str) -> bool:
+        return model.endswith(":cloud") or model.endswith("-cloud")
 
     @staticmethod
     def _optional_count(value: object, *, maximum: int) -> int | None:

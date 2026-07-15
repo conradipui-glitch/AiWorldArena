@@ -451,6 +451,7 @@ class VisibleAgent(StrictModel):
     agent_id: str = Field(pattern=r"^agent-[0-9]{3}$")
     name: str = Field(min_length=1, max_length=64)
     position: Position
+    species: str = Field(default="human", min_length=1, max_length=24)
 
 
 class AgentObservation(StrictModel):

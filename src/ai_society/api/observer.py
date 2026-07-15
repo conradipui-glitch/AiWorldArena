@@ -16,9 +16,17 @@ from typing import Any
 
 from ai_society.cognition.embeddings import DeterministicEmbeddingProvider
 from ai_society.cognition.repository import SQLiteCognitionRepository
-from ai_society.domain.enums import MemoryLayer, RunStatus, WorldEventKind
+from ai_society.domain.enums import (
+    IntelligenceTier,
+    MemoryLayer,
+    ResourceKind,
+    RunStatus,
+    ScheduledEventKind,
+    WorldEventKind,
+)
 from ai_society.domain.events import WorldEvent
-from ai_society.domain.models import ActionResult
+from ai_society.domain.models import ActionResult, Position
+from ai_society.executive.layer import ExecutiveLayer
 from ai_society.executive.projector import CognitionProjector
 from ai_society.experiment.models import ExperimentConfig
 from ai_society.experiment.scenario import (
@@ -29,6 +37,7 @@ from ai_society.persistence.repository import SnapshotRepository
 from ai_society.simulation.engine import SimulationEngine
 from ai_society.simulation.generation import generate_world
 from ai_society.simulation.policies import ScriptedPolicy
+from ai_society.providers.registry import ProviderRegistry
 
 
 ACTION_LABELS = {
@@ -53,6 +62,7 @@ ACTION_LABELS = {
     "respond_to_project": "Ответ на совместный проект",
     "contribute_to_project": "Вклад в совместный проект",
     "leave_project": "Выход из совместного проекта",
+    "attack": "Атака",
 }
 
 EVENT_LABELS = {
@@ -95,6 +105,9 @@ EVENT_LABELS = {
     WorldEventKind.MODEL_REBOUND: "получает новую модель решений",
     WorldEventKind.SNAPSHOT_IMPORTED: "загружен из сохранения",
     WorldEventKind.SCHEDULED_EVENT_SKIPPED: "пропускает событие",
+    WorldEventKind.AGENT_SPAWNED: "добавлен исследователем",
+    WorldEventKind.AGENT_ATTACKED: "атакует другое существо",
+    WorldEventKind.RESEARCHER_EVENT_TRIGGERED: "запускает событие",
 }
 
 RESOURCE_LABELS = {
@@ -113,6 +126,8 @@ class ObserverRunConfig:
     agents: list[str]
     provider: str = "deterministic"
     model: str = "scripted-v1"
+    agent_provider: str = "deterministic"
+    agent_model: str = "scripted-v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,11 +148,13 @@ class ObserverSession:
     engine: SimulationEngine
     cognition: SQLiteCognitionRepository
     projector: CognitionProjector
+    executive: ExecutiveLayer | None = None
     paused: bool = True
     speed: int = 1
     advance_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     subscribers: set[asyncio.Queue[dict[str, Any]]] = field(default_factory=set)
     last_actions: dict[str, dict[str, str | int]] = field(default_factory=dict)
+    last_reasons: dict[str, str] = field(default_factory=dict)
     task: asyncio.Task[None] | None = None
 
 
@@ -149,12 +166,14 @@ class RunRegistry:
         *,
         snapshot_root: Path,
         cognition_root: Path,
+        providers: ProviderRegistry | None = None,
         tick_seconds: float = 0.35,
     ) -> None:
         self._runs: dict[str, ObserverSession] = {}
         self._snapshot_repository = SnapshotRepository(snapshot_root)
         self._cognition_root = cognition_root
         self._cognition_root.mkdir(parents=True, exist_ok=True)
+        self._providers = providers
         self._tick_seconds = tick_seconds
         self._serial = 0
         self._closed = False
@@ -173,6 +192,21 @@ class RunRegistry:
             raise ValueError(
                 "в текущем наблюдателе доступен только локальный сценарный режим"
             )
+        random_models = []
+        if config.agent_provider == "random":
+            if self._providers is None:
+                raise ValueError("провайдеры моделей не настроены")
+            random_models = await self._providers.list_models("ollama")
+            if not random_models:
+                raise ValueError("Ollama не сообщил доступных моделей")
+        elif config.agent_provider != "deterministic":
+            if self._providers is None:
+                raise ValueError("провайдеры моделей не настроены")
+            await self._providers.validate_binding(
+                config.agent_provider, config.agent_model
+            )
+        elif config.agent_model != "scripted-v1":
+            raise ValueError("неизвестная сценарная модель поведения")
         if config.model == "scripted-experiment-v1":
             world = create_experiment_world(
                 ExperimentConfig(
@@ -190,7 +224,25 @@ class RunRegistry:
                 height=config.height,
                 agent_names=config.agents,
             )
+            for agent in world.agents.values():
+                agent.identity.long_term_goal = (
+                    "Выжить, исследовать неизвестный мир, понять своё положение "
+                    "и самостоятельно выбрать долгосрочные цели."
+                )
             policy = ScriptedPolicy()
+        if config.agent_provider != "deterministic":
+            for index, agent in enumerate(world.agents.values()):
+                if config.agent_provider == "random":
+                    binding = random_models[(config.seed + index) % len(random_models)]
+                    agent_provider = binding.provider
+                    agent_model = binding.model
+                else:
+                    agent_provider = config.agent_provider
+                    agent_model = config.agent_model
+                agent.mind.intelligence_tier = IntelligenceTier.FULL_LLM
+                agent.mind.provider = agent_provider
+                agent.mind.model = agent_model
+                agent.mind.temperature_milli = 650
         async with self._lifecycle_lock:
             existing = self._runs.get(world.run.run_id)
             if existing is not None:
@@ -242,7 +294,7 @@ class RunRegistry:
             async with session.advance_lock:
                 completed = 0
                 for _ in range(events):
-                    result = session.engine.step()
+                    result = await self._step_session(session)
                     if result is None:
                         session.paused = True
                         break
@@ -251,6 +303,117 @@ class RunRegistry:
                 await self._refresh_cognition(session)
         await self.publish(run_id)
         return completed
+
+    async def spawn_agent(
+        self,
+        run_id: str,
+        *,
+        name: str,
+        species: str,
+        provider: str,
+        model: str,
+        personality: str,
+        behavior_description: str,
+        vision_radius: int,
+        position: Position,
+        health: int,
+        hunger: int,
+        energy: int,
+    ) -> str:
+        random_models = []
+        if provider == "random":
+            if self._providers is None:
+                raise ValueError("провайдеры моделей не настроены")
+            random_models = await self._providers.list_models("ollama")
+            if not random_models:
+                raise ValueError("Ollama не сообщил доступных моделей")
+        elif provider != "deterministic":
+            if self._providers is None:
+                raise ValueError("провайдеры моделей не настроены")
+            await self._providers.validate_binding(provider, model)
+        elif model != "scripted-v1":
+            raise ValueError("неизвестная сценарная модель поведения")
+        async with self._lifecycle_lock:
+            session = self.get(run_id)
+            async with session.advance_lock:
+                if random_models:
+                    binding = random_models[
+                        (session.engine.state.seed + len(session.engine.state.agents))
+                        % len(random_models)
+                    ]
+                    provider, model = binding.provider, binding.model
+                agent = session.engine.spawn_agent(
+                    name=name,
+                    species=species,
+                    provider=provider,
+                    model=model,
+                    personality=personality,
+                    behavior_description=behavior_description,
+                    vision_radius=vision_radius,
+                    position=position,
+                    health=health,
+                    hunger=hunger,
+                    energy=energy,
+                )
+                await self._refresh_cognition(session)
+        await self.publish(run_id)
+        return agent.identity.agent_id
+
+    async def trigger_event(
+        self,
+        run_id: str,
+        *,
+        event_type: str,
+        intensity: int,
+        duration_minutes: int,
+        position: Position | None,
+        resource_kind: ResourceKind,
+    ) -> str:
+        async with self._lifecycle_lock:
+            session = self.get(run_id)
+            async with session.advance_lock:
+                event = session.engine.trigger_research_event(
+                    event_type=event_type,
+                    intensity=intensity,
+                    duration_minutes=duration_minutes,
+                    position=position,
+                    resource_kind=resource_kind,
+                )
+                await self._refresh_cognition(session)
+        await self.publish(run_id)
+        return event.event_id
+
+    async def rebind_agent_model(
+        self, run_id: str, agent_id: str, *, provider: str, model: str
+    ) -> None:
+        if provider == "deterministic":
+            raise ValueError("возврат к сценарному режиму пока недоступен")
+        if self._providers is None:
+            raise ValueError("провайдеры моделей не настроены")
+        if provider == "random":
+            descriptors = await self._providers.list_models("ollama")
+            if not descriptors:
+                raise ValueError("Ollama не сообщил доступных моделей")
+            session = self.get(run_id)
+            ordinal = int(agent_id.rsplit("-", 1)[1])
+            descriptor = descriptors[
+                (session.engine.state.seed + session.engine.state.game_minute + ordinal)
+                % len(descriptors)
+            ]
+            provider, model = descriptor.provider, descriptor.model
+        else:
+            await self._providers.validate_binding(provider, model)
+        bindings = await self._providers.available_bindings()
+        async with self._lifecycle_lock:
+            session = self.get(run_id)
+            async with session.advance_lock:
+                session.engine.hot_swap_model(
+                    agent_id,
+                    provider=provider,
+                    model=model,
+                    available_bindings=bindings,
+                )
+        await self.publish(run_id)
 
     async def set_controls(
         self, run_id: str, *, paused: bool | None, speed: int | None
@@ -353,6 +516,10 @@ class RunRegistry:
             for commitment in engine.state.commitments.values()
             if agent_id in {commitment.creator_id, commitment.beneficiary_id}
         ]
+        profile = {
+            **self._profile_for(agent.identity.long_term_goal),
+            "vision_radius": engine.vision_radius(agent_id),
+        }
         return {
             "agent_id": agent_id,
             "name": agent.identity.name,
@@ -362,6 +529,7 @@ class RunRegistry:
                 "tier": agent.mind.intelligence_tier.value,
             },
             "goal": agent.identity.long_term_goal,
+            **profile,
             "body": agent.body.model_dump(mode="json"),
             "position": agent.position.model_dump(mode="json"),
             "inventory": {
@@ -440,11 +608,39 @@ class RunRegistry:
             f"observer-{engine.state.run.run_id.removeprefix('run-')}-{self._serial}"
         )
         cognition = SQLiteCognitionRepository(self._cognition_root, database_name)
+        executive = (
+            ExecutiveLayer(
+                providers=self._providers,
+                cognition=cognition,
+                embedding_provider=DeterministicEmbeddingProvider(),
+            )
+            if self._providers is not None
+            else None
+        )
         return ObserverSession(
             engine=engine,
             cognition=cognition,
             projector=CognitionProjector(cognition, DeterministicEmbeddingProvider()),
+            executive=executive,
         )
+
+    async def _step_session(self, session: ObserverSession) -> ActionResult | None:
+        engine = session.engine
+        if engine.next_scheduled_kind() is not ScheduledEventKind.DECISION_DUE:
+            return engine.step()
+        ticket = engine.prepare_next_decision()
+        if ticket.observation.mind.intelligence_tier not in {
+            IntelligenceTier.HYBRID,
+            IntelligenceTier.FULL_LLM,
+        }:
+            return engine.step()
+        if session.executive is None:
+            return engine.step()
+        resolution = await session.executive.resolve(ticket)
+        result = engine.commit_decision(ticket, resolution)
+        session.last_reasons[ticket.agent_id] = resolution.intent.reason
+        await session.executive.record_outcome(ticket, resolution, result)
+        return result
 
     @staticmethod
     def _scenario_label(engine: SimulationEngine) -> str:
@@ -548,6 +744,10 @@ class RunRegistry:
             "clear": "Ясно",
             "rain": "Дождь",
             "cold_snap": "Резкое похолодание",
+            "heat_wave": "Жара",
+            "fog": "Туман",
+            "storm": "Шторм",
+            "drought": "Засуха",
         }
         if 6 <= hour < 19:
             night_overlay = 0.0
@@ -557,6 +757,10 @@ class RunRegistry:
             night_overlay = 0.58
         agents = []
         for agent_id, agent in sorted(state.agents.items()):
+            profile = {
+                **self._profile_for(agent.identity.long_term_goal),
+                "vision_radius": engine.vision_radius(agent_id),
+            }
             agents.append(
                 {
                     "id": agent_id,
@@ -565,8 +769,9 @@ class RunRegistry:
                     "health": agent.body.health,
                     "hunger": agent.body.hunger,
                     "energy": agent.body.energy,
-                    "model": agent.mind.model,
+                    "model": f"{agent.mind.provider}/{agent.mind.model}",
                     "goal": agent.identity.long_term_goal,
+                    **profile,
                     "current_action": self._action_for(session, agent_id),
                 }
             )
@@ -623,6 +828,20 @@ class RunRegistry:
                 ],
             },
             "agents": agents,
+            "dialogues": [
+                {
+                    "id": message.message_id,
+                    "agent_id": message.sender_id,
+                    "recipient_id": message.recipient_id,
+                    "text": message.content,
+                    "minute": message.sent_minute,
+                }
+                for message in sorted(
+                    state.messages.values(),
+                    key=lambda item: (item.sent_minute, item.message_id),
+                )[-6:]
+                if message.sent_minute >= state.game_minute - 120
+            ],
             "events": [
                 self._event_projection(engine, event)
                 for event in engine.event_log.events[-24:]
@@ -665,13 +884,73 @@ class RunRegistry:
             return f"{actor} перемещается по карте"
         if event.kind is WorldEventKind.ACTION_REJECTED:
             return f"{actor}: действие отклонено правилами мира"
+        if event.kind is WorldEventKind.MESSAGE_SENT:
+            message = engine.state.messages.get(str(event.payload.get("message_id", "")))
+            return f"{actor}: «{message.content}»" if message is not None else f"{actor} говорит"
+        if event.kind is WorldEventKind.AGENT_SPAWNED:
+            species = self._species_label(str(event.payload.get("species", "human")))
+            return f"Исследователь добавил: {actor} ({species})"
+        if event.kind is WorldEventKind.AGENT_ATTACKED:
+            target = self._agent_name(engine, str(event.payload.get("target_agent_id", "")))
+            return f"{actor} атакует {target}: −{event.payload.get('damage', 0)} здоровья"
+        if event.kind is WorldEventKind.RESEARCHER_EVENT_TRIGGERED:
+            labels = {
+                "rain": "дождь",
+                "cold_snap": "резкое похолодание",
+                "heat_wave": "жару",
+                "fog": "туман",
+                "storm": "шторм",
+                "drought": "засуху",
+                "clear": "ясную погоду",
+                "resource_cache": "новый запас ресурсов",
+                "berry_bloom": "цветение ягод",
+                "epidemic": "эпидемию",
+                "meteor": "падение метеорита",
+            }
+            event_type = str(event.payload.get("event_type", ""))
+            return f"Исследователь запустил {labels.get(event_type, 'событие мира')}"
         return f"{actor} {label}"
+
+    @staticmethod
+    def _profile_for(goal: str) -> dict[str, str]:
+        if goal.startswith("[") and "]" in goal:
+            marker, remainder = goal[1:].split("]", 1)
+            remainder = remainder.strip()
+            if remainder.startswith("[vision=") and "]" in remainder:
+                remainder = remainder.split("]", 1)[1].strip()
+            personality, separator, behavior = remainder.partition(" — ")
+            return {
+                "species": marker,
+                "personality": personality or "Не задан",
+                "behavior_description": behavior if separator else remainder.strip(),
+            }
+        return {
+            "species": "human",
+            "personality": "Самостоятельный исследователь",
+            "behavior_description": (
+                "Выжить, исследовать неизвестный мир, понять своё положение "
+                "и самостоятельно выбрать долгосрочные цели."
+                if goal == "survive and understand the world"
+                else goal
+            ),
+        }
+
+    @staticmethod
+    def _species_label(species: str) -> str:
+        return {
+            "human": "человек",
+            "wolf": "волк",
+            "bear": "медведь",
+            "boar": "кабан",
+        }.get(species, species)
 
     def _action_for(self, session: ObserverSession, agent_id: str) -> str:
         action = session.last_actions.get(agent_id)
         return "Ожидает первого решения" if action is None else str(action["label"])
 
     def _decision_explanation(self, session: ObserverSession, agent_id: str) -> str:
+        if agent_id in session.last_reasons:
+            return session.last_reasons[agent_id]
         action = self._action_for(session, agent_id)
         explanations = {
             "Осмотр": "Осматривает доступную область, чтобы пополнить известную карту.",

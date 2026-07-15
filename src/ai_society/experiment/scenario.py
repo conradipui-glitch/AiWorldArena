@@ -164,7 +164,7 @@ class ExperimentalScriptedPolicy(AgentPolicy):
     """Deterministic acceptance choreography plus the ordinary survival policy."""
 
     def __init__(self) -> None:
-        self._survival = ScriptedPolicy()
+        self._survival = ScriptedPolicy(enable_social=False)
         self._stage = {"agent-001": 0, "agent-002": 0, "agent-003": 0}
 
     def decide(self, observation, rng: DeterministicRng):

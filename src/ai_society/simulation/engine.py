@@ -19,10 +19,12 @@ from ai_society.domain.enums import (
     ScheduledEventKind,
     StructureKind,
     TerrainType,
+    WeatherKind,
     WorldEventKind,
 )
 from ai_society.domain.events import ScheduledEvent, WorldEvent
 from ai_society.domain.intents import (
+    AttackIntent,
     AnyIntent,
     BuildFireIntent,
     BuildShelterIntent,
@@ -50,6 +52,9 @@ from ai_society.domain.models import (
     ActionResult,
     Agent,
     AgentObservation,
+    AgentBodyState,
+    AgentIdentity,
+    AgentKnowledgeMap,
     Commitment,
     JointProject,
     Message,
@@ -59,6 +64,8 @@ from ai_society.domain.models import (
     TradeOffer,
     VisibleAgent,
     WorldState,
+    ResourceNode,
+    WeatherTransition,
 )
 from ai_society.persistence.canonical import canonical_digest
 from ai_society.persistence.event_log import EventLog
@@ -93,6 +100,7 @@ ACTION_DURATIONS: dict[ActionKind, int] = {
     ActionKind.RESPOND_TO_PROJECT: 3,
     ActionKind.CONTRIBUTE_TO_PROJECT: 8,
     ActionKind.LEAVE_PROJECT: 3,
+    ActionKind.ATTACK: 8,
 }
 
 BUILD_COSTS: dict[StructureKind, dict[ResourceKind, int]] = {
@@ -215,7 +223,7 @@ class SimulationEngine:
             observation = self._build_observation(
                 projected,
                 game_minute=scheduled.due_minute,
-                radius=VISIBILITY_RADIUS,
+                radius=self._vision_radius(projected),
             )
             return DecisionTicket(
                 schedule_sequence=scheduled.sequence,
@@ -314,12 +322,18 @@ class SimulationEngine:
                 },
             )
 
-    def observe(self, agent_id: str, radius: int = VISIBILITY_RADIUS) -> AgentObservation:
+    def observe(self, agent_id: str, radius: int | None = None) -> AgentObservation:
         with self._lock:
             agent = self.state.agents[agent_id].model_copy(deep=True)
             return self._build_observation(
-                agent, game_minute=self.state.game_minute, radius=radius
+                agent,
+                game_minute=self.state.game_minute,
+                radius=self._vision_radius(agent) if radius is None else radius,
             )
+
+    def vision_radius(self, agent_id: str) -> int:
+        with self._lock:
+            return self._vision_radius(self.state.agents[agent_id])
 
     def execute(self, agent_id: str, intent: AnyIntent) -> ActionResult:
         agent = self.state.agents[agent_id]
@@ -419,6 +433,26 @@ class SimulationEngine:
                 WorldEventKind.AGENT_WAITED,
                 intent.action,
                 {"reason": intent.reason},
+            )
+
+        if isinstance(intent, AttackIntent):
+            target = self._available_agent(
+                actor=agent, target_id=intent.target_agent_id, radius=1
+            )
+            if target is None:
+                return self._reject_intent(agent_id, intent, "target is unavailable")
+            damage = 14 if agent.identity.long_term_goal.casefold().startswith("[bear]") else 9
+            target.body.health = max(0, target.body.health - damage)
+            agent.body.energy = max(0, agent.body.energy - 5)
+            return self._record_success(
+                agent_id,
+                WorldEventKind.AGENT_ATTACKED,
+                intent.action,
+                {
+                    "target_agent_id": target.identity.agent_id,
+                    "damage": damage,
+                    "target_health": target.body.health,
+                },
             )
 
         if isinstance(intent, BuildFireIntent):
@@ -926,6 +960,238 @@ class SimulationEngine:
                 },
             )
 
+    def spawn_agent(
+        self,
+        *,
+        name: str,
+        species: str,
+        provider: str,
+        model: str,
+        personality: str,
+        behavior_description: str,
+        vision_radius: int,
+        position: Position,
+        health: int = 100,
+        hunger: int = 0,
+        energy: int = 100,
+    ) -> Agent:
+        """Add a researcher-configured actor at an explicit world position."""
+
+        with self._lock:
+            if self.state.run.status is RunStatus.COMPLETED:
+                raise ValueError("completed experiments cannot be modified")
+            tile = self.state.tile_at(position)
+            if tile is None or tile.terrain in {TerrainType.WATER, TerrainType.ROCK}:
+                raise ValueError("spawn position must be a walkable tile")
+            if any(agent.position == position for agent in self.state.agents.values()):
+                raise ValueError("spawn position is already occupied")
+            used = [int(agent_id.rsplit("-", 1)[1]) for agent_id in self.state.agents]
+            ordinal = max(used, default=0) + 1
+            if ordinal > 999:
+                raise ValueError("the world reached its supported actor limit")
+            agent_id = f"agent-{ordinal:03d}"
+            profile = (
+                f"[{species}] [vision={vision_radius}] {personality.strip()} — "
+                f"{behavior_description.strip()}"
+            )[:240]
+            agent = Agent(
+                identity=AgentIdentity(
+                    agent_id=agent_id,
+                    name=name.strip(),
+                    long_term_goal=profile,
+                ),
+                body=AgentBodyState(
+                    health=health,
+                    hunger=hunger,
+                    energy=energy,
+                    last_updated_minute=self.state.game_minute,
+                ),
+                mind=MindBinding(
+                    intelligence_tier=(
+                        IntelligenceTier.SCRIPTED
+                        if provider == "deterministic"
+                        else IntelligenceTier.FULL_LLM
+                    ),
+                    provider=provider,
+                    model=model,
+                    temperature_milli=650 if provider != "deterministic" else 0,
+                ),
+                position=position,
+                inventory=(
+                    {ResourceKind.BERRY: 1, ResourceKind.WATER: 1}
+                    if species == "human"
+                    else {}
+                ),
+                knowledge=AgentKnowledgeMap(),
+            )
+            self.state.agents[agent_id] = agent
+            self.state.run.modified = True
+            self.event_log.append(
+                kind=WorldEventKind.AGENT_SPAWNED,
+                game_minute=self.state.game_minute,
+                actor_id=agent_id,
+                payload={
+                    "species": species,
+                    "provider": provider,
+                    "model": model,
+                    "position": f"{position.x},{position.y}",
+                    "provenance": "researcher_intervention",
+                },
+            )
+            self._schedule(
+                kind=ScheduledEventKind.DECISION_DUE,
+                actor_id=agent_id,
+                due_minute=self.state.game_minute + 1,
+            )
+            return agent.model_copy(deep=True)
+
+    def trigger_research_event(
+        self,
+        *,
+        event_type: str,
+        intensity: int,
+        duration_minutes: int,
+        position: Position | None = None,
+        resource_kind: ResourceKind = ResourceKind.BERRY,
+    ) -> WorldEvent:
+        """Apply a bounded intervention and preserve it in the authoritative log."""
+
+        with self._lock:
+            if self.state.run.status is RunStatus.COMPLETED:
+                raise ValueError("completed experiments cannot be modified")
+            payload: dict[str, str | int | float | bool | None] = {
+                "event_type": event_type,
+                "intensity": intensity,
+                "duration_minutes": duration_minutes,
+                "provenance": "researcher_intervention",
+            }
+            if event_type in {
+                "rain",
+                "cold_snap",
+                "heat_wave",
+                "fog",
+                "storm",
+                "drought",
+                "clear",
+            }:
+                weather = WeatherKind(event_type)
+                temperature = {
+                    "rain": 9_000,
+                    "cold_snap": -8_000,
+                    "heat_wave": 38_000,
+                    "fog": 12_000,
+                    "storm": 4_000,
+                    "drought": 33_000,
+                    "clear": 18_000,
+                }[event_type]
+                crisis = event_type in {"cold_snap", "heat_wave", "storm", "drought"}
+                self.state.environment.weather = weather
+                self.state.environment.ambient_temperature_milli_c = temperature
+                self.state.environment.crisis = crisis
+                self.state.environment.last_changed_minute = self.state.game_minute
+                if event_type == "drought":
+                    reduction = max(1, intensity // 5)
+                    for resource in self.state.resources.values():
+                        if resource.kind in {ResourceKind.WATER, ResourceKind.BERRY}:
+                            resource.quantity = max(0, resource.quantity - reduction)
+                if event_type != "clear" and duration_minutes > 0:
+                    used = [
+                        int(item.transition_id.rsplit("-", 1)[1])
+                        for item in self.state.environment.transitions
+                    ]
+                    transition_id = f"weather-{max(used, default=0) + 1:04d}"
+                    transition = WeatherTransition(
+                        transition_id=transition_id,
+                        minute=self.state.game_minute + duration_minutes,
+                        weather=WeatherKind.CLEAR,
+                        ambient_temperature_milli_c=18_000,
+                        crisis=False,
+                    )
+                    self.state.environment.transitions.append(transition)
+                    self.state.environment.transitions.sort(
+                        key=lambda item: (item.minute, item.transition_id)
+                    )
+                    self._schedule(
+                        kind=ScheduledEventKind.WEATHER_CHANGE_DUE,
+                        actor_id="world",
+                        subject_id=transition_id,
+                        due_minute=transition.minute,
+                    )
+            elif event_type == "resource_cache":
+                if position is None:
+                    raise ValueError("resource event requires a map position")
+                tile = self.state.tile_at(position)
+                if tile is None or tile.terrain is TerrainType.WATER:
+                    raise ValueError("resource cache must be placed on land")
+                used = [
+                    int(resource_id.rsplit("-", 1)[1])
+                    for resource_id in self.state.resources
+                ]
+                entity_id = f"resource-{max(used, default=0) + 1:06d}"
+                quantity = max(1, intensity)
+                self.state.resources[entity_id] = ResourceNode(
+                    entity_id=entity_id,
+                    kind=resource_kind,
+                    position=position,
+                    quantity=quantity,
+                    max_quantity=quantity,
+                )
+                payload.update(
+                    {
+                        "resource": resource_kind.value,
+                        "quantity": quantity,
+                        "position": f"{position.x},{position.y}",
+                    }
+                )
+            elif event_type == "berry_bloom":
+                added = 0
+                for resource in self.state.resources.values():
+                    if resource.kind is ResourceKind.BERRY:
+                        increase = max(1, intensity // 4)
+                        resource.max_quantity = min(1_000_000, resource.max_quantity + increase)
+                        resource.quantity = min(resource.max_quantity, resource.quantity + increase)
+                        added += increase
+                payload["quantity"] = added
+            elif event_type == "epidemic":
+                damage = max(1, intensity // 4)
+                affected = 0
+                for agent in self.state.agents.values():
+                    if agent.body.health > 0:
+                        agent.body.health = max(0, agent.body.health - damage)
+                        affected += 1
+                payload.update({"damage": damage, "affected": affected})
+            elif event_type == "meteor":
+                if position is None:
+                    raise ValueError("meteor event requires a map position")
+                damage = max(5, intensity // 2)
+                affected = 0
+                for agent in self.state.agents.values():
+                    if agent.position.manhattan_distance(position) <= 2:
+                        agent.body.health = max(0, agent.body.health - damage)
+                        affected += 1
+                depleted = 0
+                for resource in self.state.resources.values():
+                    if resource.position.manhattan_distance(position) <= 2:
+                        depleted += resource.quantity
+                        resource.quantity = 0
+                payload.update(
+                    {
+                        "position": f"{position.x},{position.y}",
+                        "damage": damage,
+                        "affected": affected,
+                        "depleted_resources": depleted,
+                    }
+                )
+            else:
+                raise ValueError("unknown researcher event")
+            self.state.run.modified = True
+            return self.event_log.append(
+                kind=WorldEventKind.RESEARCHER_EVENT_TRIGGERED,
+                game_minute=self.state.game_minute,
+                actor_id="researcher",
+                payload=payload,
+            )
+
     def mark_snapshot_imported(
         self, *, source_state_hash: str, source_event_digest: str
     ) -> WorldEvent:
@@ -1166,6 +1432,7 @@ class SimulationEngine:
                 agent_id=other.identity.agent_id,
                 name=other.identity.name,
                 position=other.position,
+                species=self._species_for(other),
             )
             for other in self.state.agents.values()
             if other.identity.agent_id != agent.identity.agent_id
@@ -1227,6 +1494,34 @@ class SimulationEngine:
             ],
             accessible_projects=[item.model_copy(deep=True) for item in projects[-100:]],
         )
+
+    @staticmethod
+    def _species_for(agent: Agent) -> str:
+        goal = agent.identity.long_term_goal
+        if goal.startswith("[") and "]" in goal:
+            return goal[1:].split("]", 1)[0]
+        return "human"
+
+    def _vision_radius(self, agent: Agent) -> int:
+        if self.state.run.rules_version == "block4-v1":
+            return VISIBILITY_RADIUS
+        goal = agent.identity.long_term_goal
+        marker = "[vision="
+        if marker in goal:
+            raw = goal.split(marker, 1)[1].split("]", 1)[0]
+            try:
+                radius = max(1, min(8, int(raw)))
+            except ValueError:
+                radius = 3
+        else:
+            radius = {"human": 5, "wolf": 3, "bear": 2, "boar": 2}.get(
+                self._species_for(agent), 3
+            )
+        if self.state.environment.weather is WeatherKind.FOG:
+            return max(1, radius - 2)
+        if self.state.environment.weather is WeatherKind.STORM:
+            return max(1, radius - 1)
+        return radius
 
     def _build_structure(
         self,
@@ -1435,9 +1730,11 @@ class SimulationEngine:
         )
         cold_rate = 0
         if not protected:
-            if self.state.environment.crisis:
+            if self.state.environment.weather is WeatherKind.COLD_SNAP:
                 cold_rate = 250
-            elif self.state.environment.weather.value == "rain":
+            elif self.state.environment.weather is WeatherKind.STORM:
+                cold_rate = 180
+            elif self.state.environment.weather is WeatherKind.RAIN:
                 cold_rate = 80
         if cold_rate:
             cold_steps = elapsed // 30
@@ -1453,6 +1750,8 @@ class SimulationEngine:
             )
         if agent.body.body_temperature_milli_c <= 35_000:
             agent.body.health = max(0, agent.body.health - elapsed // 60)
+        if self.state.environment.weather in {WeatherKind.HEAT_WAVE, WeatherKind.DROUGHT}:
+            agent.body.energy = max(0, agent.body.energy - elapsed // 30)
         agent.body.last_updated_minute = game_minute
 
     def _record_decision_diagnostics(

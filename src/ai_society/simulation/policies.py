@@ -3,6 +3,7 @@ from typing import Protocol
 
 from ai_society.domain.enums import ResourceKind, TerrainType
 from ai_society.domain.intents import (
+    AttackIntent,
     AnyIntent,
     ConsumeIntent,
     GatherIntent,
@@ -10,6 +11,7 @@ from ai_society.domain.intents import (
     ObserveIntent,
     RestIntent,
     WaitIntent,
+    SpeakIntent,
 )
 from ai_society.domain.models import AgentObservation, Position, ResourceNode, Tile
 from ai_society.simulation.rng import DeterministicRng
@@ -34,6 +36,9 @@ class AgentPolicy(Protocol):
 class ScriptedPolicy:
     """Deterministic acceptance driver, not a prescribed LLM strategy."""
 
+    def __init__(self, *, enable_social: bool = True) -> None:
+        self.enable_social = enable_social
+
     def decide(self, observation: AgentObservation, rng: DeterministicRng) -> AnyIntent:
         if (
             observation.body.hunger >= 50
@@ -45,6 +50,78 @@ class ScriptedPolicy:
             )
         if observation.body.energy <= 35:
             return RestIntent(reason="restore energy before continuing")
+
+        profile = observation.long_term_goal.casefold()
+        is_mob = profile.startswith(("[wolf]", "[bear]", "[boar]"))
+        is_peaceful = any(marker in profile for marker in ("мирн", "peaceful", "избег"))
+        threats = [
+            item
+            for item in observation.visible_agents
+            if item.species in {"wolf", "bear", "boar"}
+        ]
+        if self.enable_social and not is_mob and threats:
+            threat = min(
+                threats,
+                key=lambda item: observation.position.manhattan_distance(item.position),
+            )
+            candidates = self._walkable_neighbors(
+                observation.visible_tiles, observation.position
+            )
+            if candidates:
+                destination = max(
+                    candidates,
+                    key=lambda position: (
+                        position.manhattan_distance(threat.position),
+                        -position.y,
+                        -position.x,
+                    ),
+                )
+                return MoveIntent(
+                    target=destination,
+                    reason=f"увидел угрозу ({threat.species}) и увеличивает дистанцию",
+                )
+        if is_mob and not is_peaceful and observation.visible_agents:
+            target = min(
+                observation.visible_agents,
+                key=lambda item: (
+                    observation.position.manhattan_distance(item.position),
+                    item.agent_id,
+                ),
+            )
+            if observation.position.manhattan_distance(target.position) <= 1:
+                return AttackIntent(
+                    target_agent_id=target.agent_id,
+                    reason="защищает территорию согласно заданному поведению",
+                )
+            step = self._step_toward(observation, target.position)
+            if step is not None:
+                return MoveIntent(target=step, reason="приближается к замеченной цели")
+
+        if self.enable_social and observation.visible_agents:
+            target = min(
+                observation.visible_agents,
+                key=lambda item: (
+                    observation.position.manhattan_distance(item.position),
+                    item.agent_id,
+                ),
+            )
+            distance = observation.position.manhattan_distance(target.position)
+            social_turn = (
+                observation.game_minute
+                + int(observation.agent_id.rsplit("-", 1)[1])
+            ) % 4 == 0
+            if distance <= 4 and social_turn:
+                return SpeakIntent(
+                    target_agent_id=target.agent_id,
+                    message="Я продолжаю исследовать мир. Что ты заметил рядом?",
+                    reason="обменивается наблюдениями с ближайшим существом",
+                )
+            step = self._step_toward(observation, target.position)
+            if step is not None:
+                return MoveIntent(
+                    target=step,
+                    reason="проявляет социальное любопытство и идёт к замеченному существу",
+                )
 
         known = {(position.x, position.y) for position in observation.known_positions}
         current_key = (observation.position.x, observation.position.y)

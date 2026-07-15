@@ -68,10 +68,38 @@ def _spawn_positions(tiles: list[Tile], agent_count: int) -> list[Position]:
     if len(walkable) < agent_count:
         raise ValueError("generated world does not have enough walkable spawn tiles")
     walkable.sort(key=lambda position: (position.y, position.x))
-    return [
-        walkable[min(len(walkable) - 1, ((2 * index + 1) * len(walkable)) // (2 * agent_count))]
-        for index in range(agent_count)
-    ]
+
+    # Start near the centre of the inhabitable island, then repeatedly choose
+    # the tile that is farthest from every already selected spawn.  The
+    # deterministic tie-break keeps seeded replays stable while preventing a
+    # new free-world population from appearing as one artificial cluster.
+    max_x = max(position.x for position in walkable)
+    max_y = max(position.y for position in walkable)
+    centre_x = max_x / 2
+    centre_y = max_y / 2
+    first = min(
+        walkable,
+        key=lambda position: (
+            abs(position.x - centre_x) + abs(position.y - centre_y),
+            position.y,
+            position.x,
+        ),
+    )
+    selected = [first]
+    remaining = set(walkable)
+    remaining.remove(first)
+    while len(selected) < agent_count:
+        next_position = max(
+            remaining,
+            key=lambda position: (
+                min(position.manhattan_distance(chosen) for chosen in selected),
+                -position.y,
+                -position.x,
+            ),
+        )
+        selected.append(next_position)
+        remaining.remove(next_position)
+    return selected
 
 
 def generate_world(

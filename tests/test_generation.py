@@ -17,3 +17,19 @@ def test_different_seed_changes_world() -> None:
 
 def test_tile_has_no_global_exploration_field() -> None:
     assert "explored" not in Tile.model_fields
+
+
+def test_free_world_agents_start_far_apart() -> None:
+    world = generate_world(
+        seed=20260715,
+        width=48,
+        height=48,
+        agent_names=["Ада", "Борин", "Сайра"],
+    )
+    positions = [agent.position for agent in world.agents.values()]
+
+    assert min(
+        left.manhattan_distance(right)
+        for index, left in enumerate(positions)
+        for right in positions[index + 1 :]
+    ) >= 12

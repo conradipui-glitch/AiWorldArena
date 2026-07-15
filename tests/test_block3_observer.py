@@ -82,6 +82,92 @@ def test_observer_projection_controls_inspector_and_snapshot() -> None:
     asyncio.run(scenario())
 
 
+def test_researcher_can_spawn_visible_creature_and_trigger_logged_event() -> None:
+    async def scenario() -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            app = create_app(
+                snapshot_root=root / "snapshots",
+                cognition_root=root / "cognition",
+                experiment_root=root / "experiments",
+                observer_tick_seconds=0.01,
+            )
+            async with app.router.lifespan_context(app):
+                async with AsyncClient(
+                    transport=ASGITransport(app=app), base_url="http://test"
+                ) as client:
+                    created = await client.post(
+                        "/v1/runs",
+                        json={
+                            "seed": 9123,
+                            "width": 16,
+                            "height": 16,
+                            "agents": ["Ада"],
+                        },
+                    )
+                    run_id = created.json()["run_id"]
+                    state = (await client.get(f"/v1/runs/{run_id}/state")).json()[
+                        "state"
+                    ]
+                    occupied = {
+                        (item["position"]["x"], item["position"]["y"])
+                        for item in state["agents"].values()
+                    }
+                    tile = next(
+                        item
+                        for item in state["tiles"]
+                        if item["terrain"] not in {"water", "rock"}
+                        and (item["position"]["x"], item["position"]["y"])
+                        not in occupied
+                    )
+                    position = tile["position"]
+                    spawned = await client.post(
+                        f"/v1/runs/{run_id}/agents",
+                        json={
+                            "name": "Серый",
+                            "species": "wolf",
+                            "provider": "deterministic",
+                            "model": "scripted-v1",
+                            "personality": "Осторожный",
+                            "behavior_description": "Защищает территорию",
+                            "vision_radius": 3,
+                            "x": position["x"],
+                            "y": position["y"],
+                        },
+                    )
+                    assert spawned.status_code == 201
+                    agent_id = spawned.json()["agent_id"]
+                    inspector = (
+                        await client.get(
+                            f"/v1/runs/{run_id}/agents/{agent_id}/inspector"
+                        )
+                    ).json()
+                    assert inspector["species"] == "wolf"
+                    assert inspector["vision_radius"] == 3
+                    assert inspector["personality"] == "Осторожный"
+
+                    event = await client.post(
+                        f"/v1/runs/{run_id}/events",
+                        json={
+                            "event_type": "rain",
+                            "intensity": 40,
+                            "duration_minutes": 90,
+                        },
+                    )
+                    assert event.status_code == 201
+                    observer = (
+                        await client.get(f"/v1/runs/{run_id}/observer")
+                    ).json()
+                    assert observer["run"]["modified"] is True
+                    assert observer["environment"]["weather"] == "Дождь"
+                    assert any(
+                        item["kind"] == "researcher_event_triggered"
+                        for item in observer["events"]
+                    )
+
+    asyncio.run(scenario())
+
+
 def test_headless_run_continues_after_control_without_browser() -> None:
     async def scenario() -> None:
         with TemporaryDirectory() as temporary:

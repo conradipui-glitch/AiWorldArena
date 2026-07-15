@@ -24,6 +24,8 @@ export const api = {
     agents: string[];
     provider: string;
     model: string;
+    agent_provider: string;
+    agent_model: string;
   }) => request<{ run_id: string; reused: boolean }>("/v1/runs", {
     method: "POST",
     headers: jsonHeaders,
@@ -31,6 +33,42 @@ export const api = {
   }),
   controls: (runId: string, payload: { paused?: boolean; speed?: number }) =>
     request<WorldSnapshot>(`/v1/runs/${runId}/controls`, {
+      method: "POST",
+      headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    }),
+  spawnAgent: (runId: string, payload: {
+    name: string;
+    species: "human" | "wolf" | "bear" | "boar";
+    provider: string;
+    model: string;
+    personality: string;
+    behavior_description: string;
+    vision_radius: number;
+    x: number;
+    y: number;
+    health: number;
+    hunger: number;
+    energy: number;
+  }) => request<{ agent_id: string }>(`/v1/runs/${runId}/agents`, {
+    method: "POST",
+    headers: jsonHeaders,
+    body: JSON.stringify(payload),
+  }),
+  triggerEvent: (runId: string, payload: {
+    event_type: "rain" | "cold_snap" | "heat_wave" | "fog" | "storm" | "drought" | "clear" | "resource_cache" | "berry_bloom" | "epidemic" | "meteor";
+    intensity: number;
+    duration_minutes: number;
+    resource_kind: "wood" | "stone" | "berry" | "water";
+    x?: number;
+    y?: number;
+  }) => request<{ event_id: string }>(`/v1/runs/${runId}/events`, {
+    method: "POST",
+    headers: jsonHeaders,
+      body: JSON.stringify(payload),
+    }),
+  rebindAgent: (runId: string, agentId: string, payload: { provider: string; model: string }) =>
+    request<{ agent_id: string; provider: string; model: string }>(`/v1/runs/${runId}/agents/${agentId}/model`, {
       method: "POST",
       headers: jsonHeaders,
       body: JSON.stringify(payload),

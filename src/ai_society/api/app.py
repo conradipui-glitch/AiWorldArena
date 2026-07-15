@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
 from fastapi import (
     FastAPI,
@@ -15,8 +16,10 @@ from fastapi import (
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ai_society.api.observer import ObserverRunConfig, RunRegistry
+from ai_society.domain.enums import ResourceKind
+from ai_society.domain.models import Position
 from ai_society.providers.contracts import ProviderError
-from ai_society.providers.ollama import OllamaModelProvider
+from ai_society.providers.ollama import OllamaConfig, OllamaModelProvider
 from ai_society.providers.registry import ProviderRegistry
 from ai_society.research.persistence import ResearchArtifactError
 from ai_society.research.service import ResearchService
@@ -38,6 +41,8 @@ class CreateRunRequest(BaseModel):
     )
     provider: str = Field(default="deterministic", pattern=r"^[a-z0-9_-]{1,64}$")
     model: str = Field(default="scripted-v1", pattern=r"^[A-Za-z0-9._:-]{1,128}$")
+    agent_provider: str = Field(default="deterministic", pattern=r"^[a-z0-9_-]{1,64}$")
+    agent_model: str = Field(default="scripted-v1", pattern=r"^[A-Za-z0-9._:-]{1,128}$")
 
 
 class AdvanceRunRequest(BaseModel):
@@ -71,9 +76,68 @@ class LoadSnapshotRequest(BaseModel):
     name: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
 
+class SpawnAgentRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=64)
+    species: Literal["human", "wolf", "bear", "boar"] = "wolf"
+    provider: str = Field(default="deterministic", pattern=r"^[a-z0-9_-]{1,64}$")
+    model: str = Field(default="scripted-v1", pattern=r"^[A-Za-z0-9._:-]{1,128}$")
+    personality: str = Field(min_length=1, max_length=80)
+    behavior_description: str = Field(min_length=1, max_length=150)
+    vision_radius: int = Field(default=3, ge=1, le=8)
+    x: int = Field(ge=0, le=511)
+    y: int = Field(ge=0, le=511)
+    health: int = Field(default=100, ge=1, le=100)
+    hunger: int = Field(default=0, ge=0, le=100)
+    energy: int = Field(default=100, ge=0, le=100)
+
+
+class TriggerEventRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    event_type: Literal[
+        "rain",
+        "cold_snap",
+        "heat_wave",
+        "fog",
+        "storm",
+        "drought",
+        "clear",
+        "resource_cache",
+        "berry_bloom",
+        "epidemic",
+        "meteor",
+    ]
+    intensity: int = Field(default=30, ge=1, le=100)
+    duration_minutes: int = Field(default=180, ge=0, le=7 * 24 * 60)
+    resource_kind: ResourceKind = ResourceKind.BERRY
+    x: int | None = Field(default=None, ge=0, le=511)
+    y: int | None = Field(default=None, ge=0, le=511)
+
+    @model_validator(mode="after")
+    def resource_position_is_complete(self) -> "TriggerEventRequest":
+        if self.event_type in {"resource_cache", "meteor"} and (
+            self.x is None or self.y is None
+        ):
+            raise ValueError("this event requires a map position")
+        if (self.x is None) != (self.y is None):
+            raise ValueError("map position requires both coordinates")
+        return self
+
+
+class RebindAgentRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: str = Field(pattern=r"^[a-z0-9_-]{1,64}$")
+    model: str = Field(pattern=r"^[A-Za-z0-9._:-]{1,128}$")
+
+
 def build_default_provider_registry() -> ProviderRegistry:
     registry = ProviderRegistry()
-    registry.register(OllamaModelProvider())
+    registry.register(
+        OllamaModelProvider(OllamaConfig(include_official_cloud_catalog=True))
+    )
     return registry
 
 
@@ -91,6 +155,7 @@ def create_app(
     registry = RunRegistry(
         snapshot_root=snapshot_root,
         cognition_root=cognition_root,
+        providers=provider_registry,
         tick_seconds=observer_tick_seconds,
     )
 
@@ -191,6 +256,26 @@ def create_app(
     @app.get("/v1/observer/catalog")
     async def observer_catalog() -> dict[str, object]:
         """The initial observer is intentionally explicit about its safe model mode."""
+        agent_models = [
+            {
+                "provider": "deterministic",
+                "model": "scripted-v1",
+                "label": "Сценарное поведение (локально)",
+            }
+        ]
+        providers = app.state.provider_registry
+        if providers is not None:
+            try:
+                agent_models.extend(
+                    {
+                        "provider": item.provider,
+                        "model": item.model,
+                        "label": f"Ollama · {item.display_name}",
+                    }
+                    for item in await providers.list_models("ollama")
+                )
+            except (LookupError, ProviderError):
+                pass
         return {
             "models": [
                 {
@@ -213,6 +298,26 @@ def create_app(
                 }
             ],
             "agent_names": ["Ада", "Борин", "Сайра"],
+            "agent_models": agent_models,
+            "creatures": [
+                {"id": "human", "label": "Человек"},
+                {"id": "wolf", "label": "Волк"},
+                {"id": "bear", "label": "Медведь"},
+                {"id": "boar", "label": "Кабан"},
+            ],
+            "events": [
+                {"id": "rain", "label": "Дождь", "description": "Понижает температуру и заставляет искать тепло."},
+                {"id": "cold_snap", "label": "Резкое похолодание", "description": "Опасный холод: без укрытия существа теряют здоровье."},
+                {"id": "heat_wave", "label": "Жара", "description": "Ускоряет потерю энергии и меняет приоритеты выживания."},
+                {"id": "fog", "label": "Туман", "description": "Временно сокращает поле зрения всех существ."},
+                {"id": "storm", "label": "Шторм", "description": "Холодный ливень с ухудшением зрения и состояния."},
+                {"id": "drought", "label": "Засуха", "description": "Сокращает доступные воду и ягоды, повышает температуру."},
+                {"id": "clear", "label": "Ясная погода", "description": "Немедленно завершает погодный кризис."},
+                {"id": "resource_cache", "label": "Запас ресурсов", "description": "Создаёт выбранный ресурс в отмеченной клетке."},
+                {"id": "berry_bloom", "label": "Цветение ягод", "description": "Увеличивает запасы ягод по всей карте."},
+                {"id": "epidemic", "label": "Эпидемия", "description": "Однократно снижает здоровье всех живых существ."},
+                {"id": "meteor", "label": "Падение метеорита", "description": "Повреждает существ и ресурсы рядом с выбранной клеткой."},
+            ],
         }
 
     @app.post("/v1/runs", status_code=status.HTTP_201_CREATED)
@@ -228,6 +333,8 @@ def create_app(
                     agents=request.agents,
                     provider=request.provider,
                     model=request.model,
+                    agent_provider=request.agent_provider,
+                    agent_model=request.agent_model,
                 )
             )
             if acquisition.reused:
@@ -293,6 +400,64 @@ def create_app(
         except LookupError as exc:
             raise HTTPException(status_code=404, detail="run not found") from exc
         except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/v1/runs/{run_id}/agents", status_code=status.HTTP_201_CREATED)
+    async def spawn_agent(run_id: str, request: SpawnAgentRequest) -> dict[str, str]:
+        try:
+            agent_id = await registry.spawn_agent(
+                run_id,
+                name=request.name,
+                species=request.species,
+                provider=request.provider,
+                model=request.model,
+                personality=request.personality,
+                behavior_description=request.behavior_description,
+                vision_radius=request.vision_radius,
+                position=Position(x=request.x, y=request.y),
+                health=request.health,
+                hunger=request.hunger,
+                energy=request.energy,
+            )
+            return {"agent_id": agent_id}
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail="мир или модель не найдены") from exc
+        except (ValueError, ProviderError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/v1/runs/{run_id}/events", status_code=status.HTTP_201_CREATED)
+    async def trigger_event(run_id: str, request: TriggerEventRequest) -> dict[str, str]:
+        try:
+            event_id = await registry.trigger_event(
+                run_id,
+                event_type=request.event_type,
+                intensity=request.intensity,
+                duration_minutes=request.duration_minutes,
+                position=(
+                    Position(x=request.x, y=request.y)
+                    if request.x is not None and request.y is not None
+                    else None
+                ),
+                resource_kind=request.resource_kind,
+            )
+            return {"event_id": event_id}
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail="мир не найден") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/v1/runs/{run_id}/agents/{agent_id}/model")
+    async def rebind_agent_model(
+        run_id: str, agent_id: str, request: RebindAgentRequest
+    ) -> dict[str, str]:
+        try:
+            await registry.rebind_agent_model(
+                run_id, agent_id, provider=request.provider, model=request.model
+            )
+            return {"agent_id": agent_id, "provider": request.provider, "model": request.model}
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail="мир, персонаж или модель не найдены") from exc
+        except (ValueError, ProviderError) as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.post("/v1/runs/{run_id}/snapshots")

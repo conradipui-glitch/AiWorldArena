@@ -508,7 +508,7 @@ class SQLiteCognitionRepository:
         compacted = working[: len(working) - keep_recent]
         parent_ids = [item.memory_id for item in compacted][-30:]
         body = " | ".join(item.content for item in compacted)
-        content = f"Compacted working memory: {body}"[:4_000]
+        content = f"Сжатое воспоминание: {body}"[:4_000]
         importance = max(item.importance_milli for item in compacted)
         confidence = sum(item.confidence_milli for item in compacted) // len(compacted)
         key = f"working_compaction:{compacted[0].memory_id}:{compacted[-1].memory_id}"

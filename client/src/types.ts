@@ -8,6 +8,10 @@ export type AgentSummary = {
   model: string;
   goal: string;
   current_action: string;
+  species: "human" | "wolf" | "bear" | "boar";
+  personality: string;
+  behavior_description: string;
+  vision_radius: number;
 };
 
 export type WorldSnapshot = {
@@ -38,6 +42,7 @@ export type WorldSnapshot = {
     structures: Array<{ id: string; kind: string; x: number; y: number }>;
   };
   agents: AgentSummary[];
+  dialogues: Array<{ id: string; agent_id: string; recipient_id: string; text: string; minute: number }>;
   events: Array<{ id: string; minute: number; actor_id: string | null; kind: string; text: string }>;
   instruments: {
     population: number;
@@ -52,6 +57,10 @@ export type AgentInspector = {
   name: string;
   model: { provider: string; name: string; tier: string };
   goal: string;
+  species: "human" | "wolf" | "bear" | "boar";
+  personality: string;
+  behavior_description: string;
+  vision_radius: number;
   body: { health: number; hunger: number; energy: number };
   position: { x: number; y: number };
   inventory: Record<string, number>;
@@ -61,7 +70,7 @@ export type AgentInspector = {
     game_minute: number;
     visible_tiles: Array<unknown>;
     visible_resources: Array<unknown>;
-    visible_agents: Array<unknown>;
+    visible_agents: Array<{ agent_id: string; name: string; position: { x: number; y: number }; species: string }>;
     delivered_messages: number;
   };
   known_map: Array<{ x: number; y: number }>;
@@ -74,6 +83,13 @@ export type AgentInspector = {
 export type Catalog = {
   models: Array<{ provider: string; model: string; label: string; description: string }>;
   agent_names: string[];
+  agent_models: Array<{ provider: string; model: string; label: string }>;
+  creatures: Array<{ id: "human" | "wolf" | "bear" | "boar"; label: string }>;
+  events: Array<{
+    id: "rain" | "cold_snap" | "heat_wave" | "fog" | "storm" | "drought" | "clear" | "resource_cache" | "berry_bloom" | "epidemic" | "meteor";
+    label: string;
+    description: string;
+  }>;
 };
 
 export type LiveRun = {

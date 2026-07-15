@@ -3,7 +3,7 @@ import inspect
 import pytest
 
 from ai_society.domain.enums import ActionKind
-from ai_society.domain.enums import ResourceKind, WorldEventKind
+from ai_society.domain.enums import ResourceKind, TerrainType, WorldEventKind
 from ai_society.domain.intents import (
     ConsumeIntent,
     GatherIntent,
@@ -41,6 +41,33 @@ def test_ten_thousand_scheduled_events() -> None:
     assert engine.run(10_000) == 10_000
     assert engine.state.processed_events == 10_000
     engine.event_log.verify()
+
+
+def test_species_visibility_radius_is_individual_and_persistent() -> None:
+    world = generate_world(seed=771, width=16, height=16, agent_names=["Ада"])
+    engine = SimulationEngine(state=world, policy=ScriptedPolicy())
+    occupied = {agent.position for agent in world.agents.values()}
+    position = next(
+        tile.position
+        for tile in world.tiles
+        if tile.terrain not in {TerrainType.WATER, TerrainType.ROCK}
+        and tile.position not in occupied
+    )
+    wolf = engine.spawn_agent(
+        name="Серый",
+        species="wolf",
+        provider="deterministic",
+        model="scripted-v1",
+        personality="Осторожный",
+        behavior_description="Защищает территорию",
+        vision_radius=3,
+        position=position,
+    )
+    assert engine.vision_radius("agent-001") == 5
+    assert engine.vision_radius(wolf.identity.agent_id) == 3
+    assert engine.observe(wolf.identity.agent_id).long_term_goal.startswith(
+        "[wolf] [vision=3]"
+    )
 
 
 @pytest.mark.parametrize("agent_count", [1, 3, 10])

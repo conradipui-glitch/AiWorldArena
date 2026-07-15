@@ -52,6 +52,7 @@ class PromptVisibleAgent(PromptModel):
     agent_id: str
     name: str
     position: Position
+    species: str
 
 
 class PromptStructure(PromptModel):
@@ -244,7 +245,10 @@ class AgentContextBuilder:
             ),
             visible_agents=tuple(
                 PromptVisibleAgent(
-                    agent_id=agent.agent_id, name=agent.name, position=agent.position
+                    agent_id=agent.agent_id,
+                    name=agent.name,
+                    position=agent.position,
+                    species=agent.species,
                 )
                 for agent in observation.visible_agents[:30]
             ),

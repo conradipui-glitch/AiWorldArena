@@ -48,6 +48,11 @@ class WaitIntent(IntentBase):
     action: Literal[ActionKind.WAIT] = ActionKind.WAIT
 
 
+class AttackIntent(IntentBase):
+    action: Literal[ActionKind.ATTACK] = ActionKind.ATTACK
+    target_agent_id: str = Field(pattern=r"^agent-[0-9]{3}$")
+
+
 class BuildFireIntent(IntentBase):
     action: Literal[ActionKind.BUILD_FIRE] = ActionKind.BUILD_FIRE
     location: Position
@@ -170,7 +175,8 @@ AnyIntent: TypeAlias = Annotated[
     | CreateProjectIntent
     | RespondToProjectIntent
     | ContributeToProjectIntent
-    | LeaveProjectIntent,
+    | LeaveProjectIntent
+    | AttackIntent,
     Field(discriminator="action"),
 ]
 
